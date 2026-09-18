@@ -44,11 +44,17 @@ streamlit run app.py
 ```
 
 ## Current Capabilities
-- Loading standard image formats (PNG, JPG).
-- Image preprocessing (CLAHE, Denoising).
-- Threshold-based segmentation.
-- Extracted features display.
-- Visual overlays.
+### Version 0.1
+- OpenCV preprocessing
+- CLAHE enhancement
+- Gaussian denoising
+- Otsu/adaptive segmentation
+- segmentation visualization
+- basic image feature extraction
+- Streamlit interface
+- 5 automated tests
+
+Research and educational prototype. Not for medical diagnosis or clinical decision-making.
 
 ## Limitations
 - Version 0.1 only supports simple image formats (PNG/JPG).
@@ -57,7 +63,7 @@ streamlit run app.py
 
 ## Future Roadmap
 Future versions may add:
-- DICOM/NIfTI loadings
+- DICOM/NIfTI loading
 - ROI detection
 - advanced segmentation
 - radiomics/features

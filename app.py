@@ -29,16 +29,20 @@ if st.sidebar.button("Process Image"):
             col1, col2 = st.columns(2)
             with col1:
                 orig = results["original"]
-                st.image(orig, channels="BGR" if len(orig.shape) == 3 else "GRAY", title="Original")
+                st.subheader("Original")
+                st.image(orig, channels="BGR" if len(orig.shape) == 3 else "GRAY", use_container_width=True)
             with col2:
-                st.image(results["preprocessed"], title="Preprocessed", clamp=True)
+                st.subheader("Preprocessed")
+                st.image(results["preprocessed"], clamp=True, use_container_width=True)
                 
             col3, col4 = st.columns(2)
             with col3:
-                st.image(results["mask"], title="Segmentation Mask", clamp=True)
+                st.subheader("Segmentation Mask")
+                st.image(results["mask"], clamp=True, use_container_width=True)
             with col4:
                 overlay_rgb = results["overlay"][..., ::-1] # BGR to RGB for st.image
-                st.image(overlay_rgb, title="Overlay")
+                st.subheader("Overlay")
+                st.image(overlay_rgb, use_container_width=True)
                 
             st.divider()
             st.subheader("Extracted Image Features")
