@@ -5,6 +5,7 @@ import cv2
 
 from mri_core.loader import load_mri
 from mri_core.pipeline import process_mri_image
+from mri_core.dataset_discovery import discover_mrnet_root, list_mrnet_exams, load_mrnet_exam
 
 st.set_page_config(page_title="MRI Vision Core", layout="wide")
 
@@ -14,19 +15,48 @@ st.subheader("Medical MRI & OpenCV Image Processing & Feature Exploration")
 st.warning("Research and educational prototype. Not for medical diagnosis or clinical decision-making.")
 
 st.sidebar.header("Settings")
-uploaded_file = st.sidebar.file_uploader(
-    "Upload Image / MRI Scan",
-    type=["png", "jpg", "jpeg", "dcm", "nii", "gz"],
-    help="Supported formats: PNG, JPG, JPEG, DICOM (.dcm), NIfTI (.nii, .nii.gz)"
-)
+
+# Detect if local MRNet dataset is available
+mrnet_root = discover_mrnet_root()
+data_source = "Upload File"
+if mrnet_root:
+    data_source = st.sidebar.radio("Data Source", ["Upload File", "Explore MRNet Dataset"], horizontal=True)
+
+volume = None
+status_msg = ""
+
+if data_source == "Upload File":
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload Image / MRI Scan",
+        type=["png", "jpg", "jpeg", "dcm", "nii", "gz", "npy"],
+        help="Supported formats: PNG, JPG, JPEG, DICOM (.dcm), NIfTI (.nii, .nii.gz), NumPy (.npy)"
+    )
+    if uploaded_file is not None:
+        try:
+            file_bytes = uploaded_file.read()
+            volume = load_mri(file_bytes, filename=uploaded_file.name)
+        except Exception as e:
+            st.error(f"Error loading uploaded file: {e}")
+    else:
+        status_msg = "Upload an image or MRI file (PNG, JPG, DICOM, NIfTI, NPY) and click 'Process Image' to begin."
+else:
+    st.sidebar.caption(f"Discovered MRNet at: `{mrnet_root.name}`")
+    plane = st.sidebar.selectbox("Select Imaging Plane", ["axial", "coronal", "sagittal"])
+    exams = list_mrnet_exams(plane=plane)
+    if exams:
+        exam_options = [e.name for e in exams[:200]]
+        selected_exam = st.sidebar.selectbox("Select Examination", exam_options, index=0)
+        try:
+            volume = load_mrnet_exam(selected_exam, plane=plane)
+        except Exception as e:
+            st.error(f"Error loading exam '{selected_exam}': {e}")
+    else:
+        st.sidebar.warning(f"No exam files found for plane '{plane}'.")
 
 seg_method = st.sidebar.selectbox("Select Segmentation Method", ["Otsu", "Adaptive"])
 
-if uploaded_file is not None:
+if volume is not None:
     try:
-        file_bytes = uploaded_file.read()
-        volume = load_mri(file_bytes, filename=uploaded_file.name)
-        
         # Display volume details
         st.sidebar.markdown(f"**Format:** `{volume.format_type}`")
         if volume.num_slices > 1:
@@ -36,9 +66,9 @@ if uploaded_file is not None:
                 min_value=0,
                 max_value=volume.num_slices - 1,
                 value=volume.default_slice_index,
-                help=f"Middle slice: {volume.default_slice_index}"
+                help=f"Default middle slice: {volume.default_slice_index}"
             )
-            st.sidebar.caption(f"Viewing Slice {slice_idx + 1} of {volume.num_slices}")
+            st.sidebar.caption(f"Viewing Slice {slice_idx + 1} of {volume.num_slices} (Index: {slice_idx})")
         else:
             slice_idx = 0
             
@@ -56,9 +86,8 @@ if uploaded_file is not None:
         # Action button
         process_btn = st.sidebar.button("Process Image")
         
-        # If user clicked process or has a processed state
         if process_btn:
-            is_mri = (volume.format_type in ("DICOM", "NIFTI"))
+            is_mri = (volume.format_type in ("DICOM", "NIFTI", "NUMPY"))
             results = process_mri_image(
                 display_slice,
                 segmentation_method=seg_method,
@@ -102,6 +131,7 @@ if uploaded_file is not None:
             )
 
     except Exception as e:
-        st.error(f"Error loading or processing file: {e}")
+        st.error(f"Error processing slice: {e}")
 else:
-    st.info("Upload an image or MRI file (PNG, JPG, DICOM, NIfTI) and click 'Process Image' to begin.")
+    if status_msg:
+        st.info(status_msg)

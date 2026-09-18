@@ -47,12 +47,14 @@ streamlit run app.py
 ## Capabilities
 
 ### Version 0.2 (Current)
-- **Medical Imaging Formats**: Full support for DICOM (`.dcm`) via `pydicom` and NIfTI (`.nii`, `.nii.gz`) via `nibabel`.
+- **Medical Imaging Formats**: Full support for DICOM (`.dcm`) via `pydicom`, NIfTI (`.nii`, `.nii.gz`) via `nibabel`, and NumPy volumetric arrays (`.npy`, including Stanford MRNet knee examinations).
+- **MRNet Dataset Discovery**: Dynamic path resolution for MRNet (`axial`, `coronal`, `sagittal`) without relying on hardcoded directory names, spaces, or apostrophes.
 - **DICOM Handling**: Rescale slope/intercept adjustment, photometric interpretation (`MONOCHROME1` inverted contrast vs `MONOCHROME2`), and technical non-identifying metadata extraction.
-- **Volumetric Multi-Slice Navigation**: `MRIVolume` abstraction with slice slider defaulting to the middle slice without loading unnecessary volume slices into the CV pipeline.
+- **Volumetric Multi-Slice Navigation**: `MRIVolume` abstraction with slice slider defaulting to the middle slice without loading unnecessary volume slices into the CV pipeline. Handles both (Slices, H, W) and (H, W, Slices) orientations.
 - **MRI Preprocessing Pathway**: Finite-value validation (`NaN`/`Inf` sanitization), robust percentile intensity normalization, percentile clipping, uint8 conversion, CLAHE contrast enhancement, and conservative denoising.
-- **Privacy Enforcement**: Zero patient-identifying DICOM fields logged or displayed; `.gitignore` exclusions for `.dcm`, `.nii`, `.nii.gz`, and dataset directories.
-- **18 Automated Tests**: Synthetic DICOM and NIfTI tests, slice indexing, PII protection, and numerical edge cases.
+- **Privacy Enforcement**: Zero patient-identifying fields logged or displayed; `.gitignore` exclusions for `*.dcm`, `*.nii`, `*.nii.gz`, `*.npy`, and dataset directories.
+- **21 Automated Tests**: Comprehensive suite covering synthetic DICOM/NIfTI/NumPy loading, real MRNet discovery verification, slice indexing, PII protection, and numerical edge cases.
+
 
 ### Version 0.1 (Validated Core)
 - Generic image loading (PNG, JPG, JPEG)

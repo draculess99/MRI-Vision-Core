@@ -217,3 +217,74 @@ def test_png_standard_image_backward_compatibility():
     assert vol.num_slices == 1
     assert vol.get_display_slice(0).shape[:2] == (64, 64)
 
+
+def test_synthetic_numpy_volume_loading():
+    from mri_core.loader import load_numpy
+
+    # Create synthetic MRNet-style volume: (slices, height, width) = (16, 64, 64)
+    data = np.zeros((16, 64, 64), dtype=np.uint8)
+    for z in range(16):
+        data[z, 20:44, 20:44] = (z + 1) * 15
+
+    buf = io.BytesIO()
+    np.save(buf, data)
+    npy_bytes = buf.getvalue()
+
+    assert detect_file_format(npy_bytes, "exam.npy") == "numpy"
+
+    vol = load_numpy(npy_bytes, "exam.npy")
+    assert vol.format_type == "NUMPY"
+    assert vol.num_slices == 16
+    assert vol.default_slice_index == 8
+    assert vol.slice_axis == 0
+
+    s8 = vol.get_slice(8)
+    assert s8.shape == (64, 64)
+    assert np.isclose(s8.max(), (8 + 1) * 15)
+
+    disp8 = vol.get_display_slice(8)
+    assert disp8.shape == (64, 64)
+    assert disp8.dtype == np.uint8
+
+    # Also test via unified load_mri
+    vol_unified = load_mri(npy_bytes, "exam.npy")
+    assert vol_unified.format_type == "NUMPY"
+    assert vol_unified.num_slices == 16
+
+
+def test_discover_mrnet_dataset_and_real_exam():
+    from mri_core.dataset_discovery import discover_mrnet_root, list_mrnet_exams, load_mrnet_exam
+    from pathlib import Path
+
+    root = discover_mrnet_root()
+    if not root:
+        pytest.skip("MRNet dataset not found at default path D:\\MRI_DATASETS\\MRNet")
+
+    # Verify discovered path exists and contains planes without hardcoded apostrophe
+    assert root.exists()
+    assert (root / "axial").exists()
+
+    axial_exams = list_mrnet_exams(plane="axial")
+    assert len(axial_exams) > 0
+
+    # Load real 0000.npy axial exam
+    vol = load_mrnet_exam("0000", plane="axial")
+    assert vol.format_type == "NUMPY"
+    assert vol.num_slices == 44
+    assert vol.default_slice_index == 22
+    assert vol.shape == (44, 256, 256)
+    assert vol.raw_data.dtype == np.uint8
+    assert vol.raw_data.min() == 0
+    assert vol.raw_data.max() == 255
+    assert np.isclose(vol.raw_data.mean(), 63.245, atol=0.01)
+
+    # Middle slice inspection
+    mid_slice = vol.get_slice(22)
+    assert mid_slice.shape == (256, 256)
+    assert mid_slice.dtype == np.uint8
+
+    disp_slice = vol.get_display_slice(22)
+    assert disp_slice.shape == (256, 256)
+    assert disp_slice.dtype == np.uint8
+
+
