@@ -12,6 +12,8 @@ datasets/
 *.dcm
 *.nii
 *.nii.gz
+*.npy
+
 
 models/*.pt
 models/*.pth

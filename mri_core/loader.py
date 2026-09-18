@@ -37,7 +37,7 @@ def load_image(file_bytes: bytes) -> np.ndarray:
 
 def detect_file_format(file_bytes: bytes, filename: Optional[str] = None) -> str:
     """
-    Identifies file type as 'dicom', 'nifti', 'image', or 'unknown'.
+    Identifies file type as 'dicom', 'nifti', 'numpy', 'image', or 'unknown'.
     Uses file extension hints and file magic bytes.
     """
     name_lower = (filename or "").lower()
@@ -46,6 +46,8 @@ def detect_file_format(file_bytes: bytes, filename: Optional[str] = None) -> str
         return "dicom"
     if name_lower.endswith(".nii") or name_lower.endswith(".nii.gz"):
         return "nifti"
+    if name_lower.endswith(".npy") or file_bytes.startswith(b"\x93NUMPY"):
+        return "numpy"
     if any(name_lower.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".bmp", ".webp"]):
         return "image"
         
@@ -67,6 +69,10 @@ def detect_file_format(file_bytes: bytes, filename: Optional[str] = None) -> str
     if len(file_bytes) >= 348 and file_bytes[344:348] in (b"n+1\0", b"ni1\0", b"n+2\0"):
         return "nifti"
         
+    # NumPy magic
+    if file_bytes.startswith(b"\x93NUMPY"):
+        return "numpy"
+
     # PNG magic
     if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image"
@@ -183,10 +189,52 @@ def load_nifti(file_bytes: bytes, filename: Optional[str] = None) -> MRIVolume:
     except Exception as e:
         raise ValueError(f"Failed to load NIfTI image: {e}")
 
+def load_numpy(file_bytes: bytes, filename: Optional[str] = None) -> MRIVolume:
+    """
+    Loads NumPy (.npy) array bytes (such as MRNet examinations) into an MRIVolume.
+    Automatically handles (S, H, W) slice orientation.
+    """
+    try:
+        arr = np.load(io.BytesIO(file_bytes))
+        
+        # In MRNet, shape is (num_slices, 256, 256) where axis 0 is the slice axis
+        if arr.ndim == 3:
+            if arr.shape[0] < arr.shape[1] and arr.shape[0] < arr.shape[2]:
+                slice_axis = 0
+            else:
+                slice_axis = 2
+            num_slices = arr.shape[slice_axis]
+        elif arr.ndim == 2:
+            slice_axis = 0
+            num_slices = 1
+        else:
+            slice_axis = 0
+            num_slices = 1
+
+        metadata = {
+            "Modality": "MRI (NumPy / MRNet)",
+            "Dimensions": list(arr.shape),
+            "Data Type": str(arr.dtype),
+            "Slice Count": num_slices,
+            "Intensity Min": float(arr.min()),
+            "Intensity Max": float(arr.max()),
+            "Intensity Mean": round(float(arr.mean()), 3),
+        }
+
+        return MRIVolume(
+            data=arr,
+            metadata=metadata,
+            format_type="NUMPY",
+            is_inverted=False,
+            slice_axis=slice_axis
+        )
+    except Exception as e:
+        raise ValueError(f"Failed to load NumPy (.npy) MRI file: {e}")
+
 def load_mri(file_bytes: bytes, filename: Optional[str] = None) -> MRIVolume:
     """
     Unified loader for medical and generic images.
-    Auto-detects format (DICOM, NIfTI, PNG/JPG/JPEG).
+    Auto-detects format (DICOM, NIfTI, NumPy, PNG/JPG/JPEG).
     """
     fmt = detect_file_format(file_bytes, filename)
     
@@ -194,6 +242,8 @@ def load_mri(file_bytes: bytes, filename: Optional[str] = None) -> MRIVolume:
         return load_dicom(file_bytes)
     elif fmt == "nifti":
         return load_nifti(file_bytes, filename)
+    elif fmt == "numpy":
+        return load_numpy(file_bytes, filename)
     elif fmt == "image":
         img_array = load_image(file_bytes)
         metadata = {
@@ -212,6 +262,7 @@ def load_mri(file_bytes: bytes, filename: Optional[str] = None) -> MRIVolume:
         # Fallback trial
         for loader_fn in [
             load_dicom,
+            load_numpy,
             lambda b: load_nifti(b, filename),
             lambda b: MRIVolume(load_image(b), metadata={"Format": "Standard Image"}, format_type="IMAGE")
         ]:
@@ -221,6 +272,7 @@ def load_mri(file_bytes: bytes, filename: Optional[str] = None) -> MRIVolume:
                 continue
                 
         raise ValueError(
-            "Unsupported or corrupted file format. Supported formats: PNG, JPG, JPEG, DICOM (.dcm), NIfTI (.nii, .nii.gz)"
+            "Unsupported or corrupted file format. Supported formats: PNG, JPG, JPEG, DICOM (.dcm), NIfTI (.nii, .nii.gz), NumPy (.npy)"
         )
+
 
