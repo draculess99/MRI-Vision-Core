@@ -252,6 +252,7 @@ def test_synthetic_numpy_volume_loading():
     assert vol_unified.num_slices == 16
 
 
+@pytest.mark.mrnet
 def test_discover_mrnet_dataset_and_real_exam():
     from mri_core.dataset_discovery import discover_mrnet_root, list_mrnet_exams, load_mrnet_exam
     from pathlib import Path
@@ -286,5 +287,4 @@ def test_discover_mrnet_dataset_and_real_exam():
     disp_slice = vol.get_display_slice(22)
     assert disp_slice.shape == (256, 256)
     assert disp_slice.dtype == np.uint8
-
 
