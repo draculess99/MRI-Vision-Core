@@ -146,3 +146,44 @@ Feature extraction took **179.205 seconds**; training the three scaled logistic 
 - The UI's threshold segmentation remains separate from the predictive baseline and is not medically validated.
 
 Future work should evaluate stronger features and robustness without repeatedly tuning against this validation split. ROI tools, deep segmentation, volumetric radiomics, and an API remain possible later milestones.
+
+## V0.5 CNN experiment
+
+V0.5 adds an optional PyTorch path that is separate from Streamlit and preserves the V0.4 handcrafted-feature baseline. Install the optional dependency in a separate environment; the base `requirements.txt` does not require PyTorch:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-cnn.txt
+```
+
+The reference CNN uses a shared four-block 2D encoder (16, 32, 64, and 128 channels), GroupNorm, ReLU, spatial mean pooling, masked max pooling across nine sampled slices, plane concatenation, dropout, and three independent logits for abnormality, ACL tear, and meniscal tear. It has 97,779 trainable parameters in the reference configuration. Inputs are grayscale, 128×128, and use the existing per-slice 1st/99th percentile normalization. Training augmentation applies one deterministic affine/contrast transform to all slices of a plane; validation has no augmentation. BCE-with-logits uses positive weights computed from training labels only.
+
+Local execution is intentionally limited to synthetic CPU smoke tests. Full MRNet training refuses CPU and requires CUDA. The CPU smoke command creates temporary synthetic arrays and labels, then verifies dataset tensors, forward/loss/backward/optimizer behavior, checkpoint reload, prediction generation, and metrics:
+
+```powershell
+.\.venv\Scripts\python.exe -B -m mri_core.cnn_train smoke
+```
+
+The Kaggle-ready entrypoint is `scripts/kaggle_cnn.py`. Attach the Stanford arrays and six label CSVs as a Kaggle input dataset; keep the source files under `/kaggle/input` and write derived artifacts under `/kaggle/working`. Select the documented NVIDIA T4×2 accelerator, use `cuda:0`, and run the one-epoch benchmark first:
+
+```bash
+pip install -r requirements-cnn.txt
+python scripts/kaggle_cnn.py benchmark \
+  --dataset-root /kaggle/input/mrnet/MRNet_ Knee MRI's_files \
+  --labels-dir /kaggle/input/mrnet/labels \
+  --output-root /kaggle/working/outputs/v0.5 \
+  --recover-first-row
+```
+
+After inspecting the benchmark report, launch the fixed three-seed experiment with the same paths:
+
+```bash
+python scripts/kaggle_cnn.py train \
+  --dataset-root /kaggle/input/mrnet/MRNet_ Knee MRI's_files \
+  --labels-dir /kaggle/input/mrnet/labels \
+  --output-root /kaggle/working/outputs/v0.5 \
+  --recover-first-row
+```
+
+The benchmark and training commands require the V0.4 manifest fingerprint and exact 1,130/120 train/validation split. They reject missing or unlabeled images, split changes, and CPU full runs. Each run records its config, source hashes, environment, sampling indices, checkpoints, predictions, losses, timings, and per-seed comparison metrics under the output directory. No source arrays or CSVs are copied into Git.
+
+Planning estimates for the reference configuration are 10–45 minutes for the three-plane, 20-epoch run on a typical Kaggle T4-class GPU, 2–4 GB VRAM, and roughly 1–3 MB per checkpoint. The first epoch benchmark replaces these estimates with measured timing and peak CUDA memory. The current local machine has no CUDA-capable PyTorch device, so no real-data CNN run has been started.
