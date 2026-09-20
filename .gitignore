@@ -18,3 +18,12 @@ datasets/
 models/*.pt
 models/*.pth
 models/*.onnx
+
+# External Stanford source labels (synthetic fixtures are generated at test time).
+train_abnormal.csv
+train_acl.csv
+train_meniscus.csv
+valid_abnormal.csv
+valid_acl.csv
+valid_meniscus.csv
+.venv-cnn/
