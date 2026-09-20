@@ -5,18 +5,21 @@ from torch import nn
 
 
 class MRNetCNN(nn.Module):
-    def __init__(self, num_planes=3, dropout=0.2):
+    def __init__(self, num_planes=3, dropout=0.2, num_targets=3):
         super().__init__()
         if num_planes not in (1, 2, 3):
             raise ValueError("Expected one to three planes")
+        if type(num_targets) is not int or num_targets < 1:
+            raise ValueError("Expected a positive target count")
         self.num_planes = num_planes
+        self.num_targets = num_targets
         blocks, previous = [], 1
         for channels in (16, 32, 64, 128):
             blocks.extend([nn.Conv2d(previous, channels, 3, stride=2, padding=1, bias=False),
                            nn.GroupNorm(8, channels), nn.ReLU()])
             previous = channels
         self.encoder = nn.Sequential(*blocks)
-        self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(128 * num_planes, 3))
+        self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(128 * num_planes, num_targets))
 
     def forward(self, images, mask):
         if images.ndim != 6 or images.shape[1] != self.num_planes or images.shape[3] != 1:

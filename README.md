@@ -147,6 +147,28 @@ Feature extraction took **179.205 seconds**; training the three scaled logistic 
 
 Future work should evaluate stronger features and robustness without repeatedly tuning against this validation split. ROI tools, deep segmentation, volumetric radiomics, and an API remain possible later milestones.
 
+## RSNA Knee Abnormality Detection adapter
+
+The RSNA adapter is metadata-first and supports the verified CSV layout under `data/rsna-knee/` without requiring the approximately 570 GB DICOM collection. It preserves `StudyInstanceUID` and `SeriesInstanceUID` as strings, groups series by study, exposes `Fluid_Sensitive`, `Fat_Suppression`, and `Anatomical_Plane`, and reports whether `train_series/<StudyInstanceUID>/<SeriesInstanceUID>/` and `test_series/<StudyInstanceUID>/<SeriesInstanceUID>/` exist. The exact 12 targets are `ACL`, `MCL`, `Medial Meniscus`, `Lateral Meniscus`, `Medial OA`, `Lateral OA`, `PF OA`, `Effusion`, `Synovitis`, `Baker's`, `Contusion`, and `Fracture`.
+
+The current local metadata inspection found **4,407 training studies**, **3 test studies**, and **24,371 training series**. Series per study range from 3 to 14, with mean 5.5301 and median 5. The series counts are Sagittal 9,864, Coronal 8,609, and Axial 5,898. Fluid-sensitive counts are 14,010 true / 10,361 false; fat-suppression counts are 14,010 true / 10,361 false. Only **58 studies have complete 12-target labels**; 4,349 rows have every target missing. Training must therefore use only complete-label studies and must not treat missing labels as negatives.
+
+Inspect metadata now:
+
+```powershell
+.\.venv\Scripts\python.exe -B scripts\kaggle_rsna_knee.py inspect --data-dir data\rsna-knee
+```
+
+With DICOM data attached later, the future commands are:
+
+```powershell
+.\.venv\Scripts\python.exe -B scripts\kaggle_rsna_knee.py train --data-dir <path> --config configs\rsna_knee.json
+.\.venv\Scripts\python.exe -B scripts\kaggle_rsna_knee.py evaluate --data-dir <path> --checkpoint <path>
+.\.venv\Scripts\python.exe -B scripts\kaggle_rsna_knee.py submit --data-dir <path> --checkpoint <path> --output submission.csv
+```
+
+The model reuses the V0.5 shared encoder with a 12-logit head and applies one sigmoid probability per target. Training uses study-level splitting, `BCEWithLogitsLoss`, the configured seed, CUDA when available, CPU otherwise, and best-checkpoint selection by macro ROC-AUC. Per-label ROC-AUC is reported when both validation classes are present; single-class validation labels are reported as unavailable instead of raising. Submission generation takes the exact column order and study IDs from `sample_submission.csv`. Source CSVs, DICOM directories, checkpoints, and generated submissions are ignored by Git.
+
 ## V0.5 CNN experiment
 
 V0.5 adds an optional PyTorch path that is separate from Streamlit and preserves the V0.4 handcrafted-feature baseline. Install the optional dependency in a separate environment; the base `requirements.txt` does not require PyTorch:
