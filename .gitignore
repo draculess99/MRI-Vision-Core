@@ -27,3 +27,11 @@ valid_abnormal.csv
 valid_acl.csv
 valid_meniscus.csv
 .venv-cnn/
+
+# RSNA Knee source metadata/images and derived artifacts.
+data/rsna-knee/
+**/train_series/
+**/test_series/
+checkpoints/
+outputs/rsna-knee/
+submission.csv
