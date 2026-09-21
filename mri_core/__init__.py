@@ -15,6 +15,7 @@ from .preprocessing import (
     validate_finite,
 )
 from .pipeline import process_mri_image
+from .dicom_series import DicomSeriesError, DicomSeriesWarning, load_dicom_series
 from .dataset_discovery import (
     discover_mrnet_root,
     list_mrnet_exams,
@@ -34,6 +35,9 @@ __all__ = [
     "robust_percentile_normalize",
     "validate_finite",
     "process_mri_image",
+    "load_dicom_series",
+    "DicomSeriesError",
+    "DicomSeriesWarning",
     "discover_mrnet_root",
     "list_mrnet_exams",
     "load_mrnet_exam",

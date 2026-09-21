@@ -21,11 +21,14 @@ def main(argv=None):
     evaluate.add_argument("--data-dir", type=Path, required=True); evaluate.add_argument("--checkpoint", type=Path, required=True)
     submit = sub.add_parser("submit")
     submit.add_argument("--data-dir", type=Path, required=True); submit.add_argument("--checkpoint", type=Path, required=True); submit.add_argument("--output", type=Path, required=True)
+    for command in (inspect, train, evaluate, submit):
+        command.add_argument("--dicom-root", type=Path, default=None,
+                             help="folder holding train_series/ and test_series/ (default: --data-dir)")
     args = parser.parse_args(argv)
     if args.command == "inspect":
-        print(json.dumps(metadata_report(load_rsna_metadata(args.data_dir)), indent=2))
+        print(json.dumps(metadata_report(load_rsna_metadata(args.data_dir, args.dicom_root)), indent=2))
         return 0
-    metadata = load_rsna_metadata(args.data_dir)
+    metadata = load_rsna_metadata(args.data_dir, args.dicom_root)
     if args.command == "train":
         from mri_core.rsna_knee_train import train_rsna
         config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -35,7 +38,7 @@ def main(argv=None):
         checkpoint = __import__("torch").load(args.checkpoint, map_location="cpu", weights_only=True)
         print(json.dumps({"checkpoint": str(args.checkpoint), "validation": checkpoint.get("validation"), "targets": TARGET_COLUMNS}, indent=2)); return 0
     from mri_core.rsna_knee_submit import write_submission
-    write_submission(args.data_dir, args.checkpoint, args.output)
+    write_submission(args.data_dir, args.checkpoint, args.output, dicom_root=args.dicom_root)
     print(json.dumps({"output": str(args.output), "columns": ["StudyInstanceUID", *TARGET_COLUMNS]})); return 0
 
 
