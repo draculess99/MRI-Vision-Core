@@ -10,8 +10,8 @@ from .rsna_knee_model import RSNAKneeCNN
 from .rsna_knee_train import RSNAKneeDicomDataset
 
 
-def write_submission(data_dir, checkpoint, output, batch_size=8, num_workers=0, device="auto"):
-    metadata = load_rsna_metadata(data_dir)
+def write_submission(data_dir, checkpoint, output, batch_size=8, num_workers=0, device="auto", dicom_root=None):
+    metadata = load_rsna_metadata(data_dir, dicom_root)
     checkpoint_data = torch.load(checkpoint, map_location="cpu", weights_only=True)
     if checkpoint_data.get("target_columns") != list(TARGET_COLUMNS):
         raise ValueError("Checkpoint target order does not match RSNA schema")

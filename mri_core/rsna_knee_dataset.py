@@ -1,11 +1,15 @@
 """Metadata and optional DICOM access for the RSNA Knee Abnormality dataset."""
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+from .dicom_series import DicomSeriesWarning, load_dicom_series
+from .mri_volume import MRIVolume
 
 TARGET_COLUMNS = (
     "ACL", "MCL", "Medial Meniscus", "Lateral Meniscus", "Medial OA",
@@ -38,6 +42,13 @@ class RSNAKneeMetadata:
     test: pd.DataFrame
     test_series: pd.DataFrame
     sample_submission: pd.DataFrame
+    dicom_root: Optional[Path] = None  # holds train_series/ and test_series/; defaults to data_dir
+
+    def dicom_split_dir(self, split: str = "train") -> Path:
+        if split not in ("train", "test"):
+            raise ValueError("split must be train or test")
+        root = self.data_dir if self.dicom_root is None else self.dicom_root
+        return root / f"{split}_series"
 
     def series_for(self, study_uid: str, split: str = "train") -> pd.DataFrame:
         if split not in ("train", "test"):
@@ -61,12 +72,11 @@ class RSNAKneeMetadata:
         return self.train.dropna(subset=list(TARGET_COLUMNS)).copy()
 
     def dicom_series_dir(self, study_uid: str, series_uid: str, split: str = "train") -> Path:
-        if split not in ("train", "test"):
-            raise ValueError("split must be train or test")
-        return self.data_dir / f"{split}_series" / str(study_uid) / str(series_uid)
+        return self.dicom_split_dir(split) / str(study_uid) / str(series_uid)
 
 
-def load_rsna_metadata(data_dir: Path | str) -> RSNAKneeMetadata:
+def load_rsna_metadata(data_dir: Path | str, dicom_root: Path | str | None = None) -> RSNAKneeMetadata:
+    """Read the metadata CSVs in data_dir. DICOMs are expected under dicom_root (default: data_dir)."""
     root = Path(data_dir)
     train = _read_csv(root / "train.csv", ("StudyInstanceUID", "Report", *TARGET_COLUMNS))
     train_series = _read_csv(root / "train_series.csv", SERIES_COLUMNS)
@@ -81,7 +91,41 @@ def load_rsna_metadata(data_dir: Path | str) -> RSNAKneeMetadata:
         unknown = set(frame["Anatomical_Plane"].dropna().astype(str)) - set(PLANE_NAMES)
         if unknown:
             raise ValueError(f"{name}: unknown Anatomical_Plane values {sorted(unknown)}")
-    return RSNAKneeMetadata(root, train, train_series, test, test_series, sample)
+    return RSNAKneeMetadata(root, train, train_series, test, test_series, sample,
+                            None if dicom_root is None else Path(dicom_root))
+
+
+def load_series_volume(metadata: RSNAKneeMetadata, study_uid: str, series_uid: str, split: str = "train") -> MRIVolume:
+    """Load one RSNA series from its DICOMs as an ordered MRIVolume, cross-checked against the CSV metadata."""
+    rows = metadata.series_for(study_uid, split)
+    match = rows[rows["SeriesInstanceUID"].astype(str) == str(series_uid)]
+    if len(match) != 1:
+        raise KeyError(f"Expected one {split} series row for study {study_uid} / series {series_uid}, found {len(match)}")
+    row = match.iloc[0]
+    directory = metadata.dicom_series_dir(study_uid, series_uid, split)
+    if not directory.is_dir():
+        raise FileNotFoundError(f"RSNA DICOM series directory not found: {directory}. "
+                                f"DICOMs are looked up under {metadata.dicom_split_dir(split)}; "
+                                "pass dicom_root (--dicom-root) if they are stored elsewhere.")
+    plane = str(row["Anatomical_Plane"])
+    flag = lambda value: None if pd.isna(value) else bool(value)
+    volume = load_dicom_series(directory, expected_series_uid=str(series_uid), expected_study_uid=str(study_uid),
+                               extra_metadata={"Anatomical Plane": plane,
+                                               "Fluid Sensitive": flag(row["Fluid_Sensitive"]),
+                                               "Fat Suppression": flag(row["Fat_Suppression"])})
+    derived = volume.metadata.get("Acquisition Plane (DICOM orientation)")
+    if derived is not None and derived != plane:
+        warnings.warn(f"Series {series_uid}: metadata says {plane} but DICOM orientation indicates {derived}",
+                      DicomSeriesWarning, stacklevel=2)
+    return volume
+
+
+def load_study_volumes(metadata: RSNAKneeMetadata, study_uid: str, split: str = "train") -> dict[str, MRIVolume]:
+    """Load every series of a study, keyed by SeriesInstanceUID in metadata order."""
+    series_uids = metadata.series_for(study_uid, split)["SeriesInstanceUID"].astype(str).tolist()
+    if not series_uids:
+        raise KeyError(f"No {split} series listed for study {study_uid}")
+    return {uid: load_series_volume(metadata, study_uid, uid, split) for uid in series_uids}
 
 
 def split_labeled_studies(metadata: RSNAKneeMetadata, validation_fraction: float, seed: int):
@@ -106,8 +150,8 @@ def metadata_report(metadata: RSNAKneeMetadata) -> dict:
     for target in TARGET_COLUMNS:
         prevalence[target] = float(metadata.train[target].dropna().mean()) if metadata.train[target].notna().any() else None
         missing[target] = int(metadata.train[target].isna().sum())
-    dicom_train = metadata.data_dir / "train_series"
-    dicom_test = metadata.data_dir / "test_series"
+    dicom_train = metadata.dicom_split_dir("train")
+    dicom_test = metadata.dicom_split_dir("test")
     return {
         "training_studies": int(metadata.train["StudyInstanceUID"].nunique()),
         "test_studies": int(metadata.test["StudyInstanceUID"].nunique()),

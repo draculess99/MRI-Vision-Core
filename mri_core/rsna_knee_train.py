@@ -53,8 +53,8 @@ class RSNAKneeDicomDataset(Dataset):
         self.metadata, self.studies, self.config, self.split = metadata, studies.reset_index(drop=True), config, split
         if not len(self.studies):
             raise ValueError(f"No studies in {split} split")
-        if not (metadata.data_dir / f"{split}_series").is_dir():
-            raise FileNotFoundError(f"DICOM directory unavailable: {metadata.data_dir / f'{split}_series'}")
+        if not metadata.dicom_split_dir(split).is_dir():
+            raise FileNotFoundError(f"DICOM directory unavailable: {metadata.dicom_split_dir(split)}")
 
     def __len__(self):
         return len(self.studies)
@@ -106,7 +106,7 @@ def _macro_loss(losses):
 def train_rsna(metadata: RSNAKneeMetadata, config: dict, checkpoint_path: Path):
     seed_everything(int(config["seed"]))
     train_frame, valid_frame = split_labeled_studies(metadata, float(config["validation_fraction"]), int(config["seed"]))
-    if not (metadata.data_dir / "train_series").is_dir():
+    if not metadata.dicom_split_dir("train").is_dir():
         raise FileNotFoundError("RSNA DICOM files are not available; inspect supports metadata-only operation, training requires images")
     device_name = config.get("device", "auto")
     device = torch.device("cuda" if device_name == "auto" and torch.cuda.is_available() else "cpu") if device_name == "auto" else torch.device(device_name)
