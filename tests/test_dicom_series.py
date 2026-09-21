@@ -5,7 +5,7 @@ import pytest
 
 from mri_core import DicomSeriesError, DicomSeriesWarning, MRIVolume, load_dicom_series
 
-from .dicom_factory import AXIAL, CORONAL, SAGITTAL, SERIES_UID, STUDY_UID, at, write_series
+from .dicom_factory import AXIAL, CORONAL, SAGITTAL, SERIES_UID, STUDY_UID, at, corrupt_element, write_series
 
 
 def pixel_values(volume):
@@ -156,6 +156,36 @@ def test_malformed_series_is_rejected(tmp_path, mutate, message):
     write_series(tmp_path, count=5, mutate=mutate)
     with pytest.raises(DicomSeriesError, match=message):
         load_dicom_series(tmp_path)
+
+
+def _with_rescale(index, ds):
+    ds.RescaleSlope, ds.RescaleIntercept = 2.0, 1.0
+
+
+# (element, corrupt text, index of the slice to corrupt). Slice metadata is read from the first slice (index 0);
+# spacing and rescale values are read from every slice.
+MALFORMED_NUMERIC_HEADERS = [
+    ("PixelSpacing", "a\\b", 1),
+    ("PixelSpacing", "0.5", 2),
+    ("RescaleSlope", "abc", 2),
+    ("RescaleIntercept", "xyz", 1),
+    ("SliceThickness", "abc", 0),
+    ("SpacingBetweenSlices", "abc", 0),
+    ("InstanceNumber", "x", 1),
+]
+
+
+@pytest.mark.filterwarnings("ignore:Invalid value for VR")  # pydicom itself warns when it reads these values
+@pytest.mark.parametrize("keyword,bad,slice_index", MALFORMED_NUMERIC_HEADERS,
+                         ids=[f"{k}-{b!r}-slice{i}" for k, b, i in MALFORMED_NUMERIC_HEADERS])
+def test_malformed_numeric_header_is_a_dicom_series_error_naming_the_file(tmp_path, keyword, bad, slice_index):
+    paths = write_series(tmp_path, count=3, mutate=_with_rescale)
+    corrupt_element(paths[slice_index], keyword, bad)
+    with pytest.raises(DicomSeriesError) as excinfo:
+        load_dicom_series(tmp_path)
+    message = str(excinfo.value)
+    assert paths[slice_index].name in message
+    assert keyword in message
 
 
 def test_garbage_file_is_reported_by_name_not_skipped(tmp_path):
