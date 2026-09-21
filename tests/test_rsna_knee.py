@@ -88,6 +88,7 @@ def test_submission_template_schema_and_metadata_only_no_dicom(tmp_path):
     assert not (root / "test_series" / test_ids[0]).exists()
 
 
+@pytest.mark.filterwarnings("ignore:Invalid value for VR UI")  # toy IDs such as 'test-001' are not DICOM UID syntax
 def test_submission_generation_with_tiny_synthetic_dicom(tmp_path):
     import pydicom
     from pydicom.dataset import FileDataset, FileMetaDataset
@@ -101,6 +102,8 @@ def test_submission_generation_with_tiny_synthetic_dicom(tmp_path):
         meta.MediaStorageSOPClassUID = SecondaryCaptureImageStorage
         meta.MediaStorageSOPInstanceUID = generate_uid()
         ds = FileDataset(str(directory / "1.dcm"), {}, file_meta=meta, preamble=b"\0" * 128)
+        ds.StudyInstanceUID = uid; ds.SeriesInstanceUID = series_uid
+        ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]; ds.ImagePositionPatient = [0.0, 0.0, 0.0]
         ds.Rows = 32; ds.Columns = 32; ds.SamplesPerPixel = 1; ds.PhotometricInterpretation = "MONOCHROME2"
         ds.BitsAllocated = 16; ds.BitsStored = 16; ds.HighBit = 15; ds.PixelRepresentation = 0
         ds.InstanceNumber = 1; ds.PixelData = np.zeros((32, 32), dtype=np.uint16).tobytes(); ds.save_as(directory / "1.dcm")

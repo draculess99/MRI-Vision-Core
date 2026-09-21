@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .dicom_series import DicomSeriesWarning, load_dicom_series
+from .dicom_series import DicomSeriesError, DicomSeriesWarning, load_dicom_series
 from .mri_volume import MRIVolume
 
 TARGET_COLUMNS = (
@@ -103,16 +103,20 @@ def load_series_volume(metadata: RSNAKneeMetadata, study_uid: str, series_uid: s
         raise KeyError(f"Expected one {split} series row for study {study_uid} / series {series_uid}, found {len(match)}")
     row = match.iloc[0]
     directory = metadata.dicom_series_dir(study_uid, series_uid, split)
+    who = f"StudyInstanceUID={study_uid} SeriesInstanceUID={series_uid}"
     if not directory.is_dir():
-        raise FileNotFoundError(f"RSNA DICOM series directory not found: {directory}. "
+        raise FileNotFoundError(f"{who}: RSNA DICOM series directory not found: {directory}. "
                                 f"DICOMs are looked up under {metadata.dicom_split_dir(split)}; "
                                 "pass dicom_root (--dicom-root) if they are stored elsewhere.")
     plane = str(row["Anatomical_Plane"])
     flag = lambda value: None if pd.isna(value) else bool(value)
-    volume = load_dicom_series(directory, expected_series_uid=str(series_uid), expected_study_uid=str(study_uid),
-                               extra_metadata={"Anatomical Plane": plane,
-                                               "Fluid Sensitive": flag(row["Fluid_Sensitive"]),
-                                               "Fat Suppression": flag(row["Fat_Suppression"])})
+    try:
+        volume = load_dicom_series(directory, expected_series_uid=str(series_uid), expected_study_uid=str(study_uid),
+                                   extra_metadata={"Anatomical Plane": plane,
+                                                   "Fluid Sensitive": flag(row["Fluid_Sensitive"]),
+                                                   "Fat Suppression": flag(row["Fat_Suppression"])})
+    except DicomSeriesError as exc:
+        raise DicomSeriesError(f"{who}: {exc}") from exc
     derived = volume.metadata.get("Acquisition Plane (DICOM orientation)")
     if derived is not None and derived != plane:
         warnings.warn(f"Series {series_uid}: metadata says {plane} but DICOM orientation indicates {derived}",

@@ -13,7 +13,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from .rsna_knee_dataset import (PLANE_NAMES, TARGET_COLUMNS, RSNAKneeMetadata,
-                                split_labeled_studies)
+                                load_series_volume, split_labeled_studies)
 from .rsna_knee_model import RSNAKneeCNN
 
 
@@ -47,7 +47,7 @@ def _normalize(array):
 
 
 class RSNAKneeDicomDataset(Dataset):
-    """Minimal series reader. It is only instantiated when DICOM directories exist."""
+    """Reads each study's series through load_series_volume; a malformed series raises instead of being skipped."""
 
     def __init__(self, metadata: RSNAKneeMetadata, studies, config, split="train"):
         self.metadata, self.studies, self.config, self.split = metadata, studies.reset_index(drop=True), config, split
@@ -60,41 +60,26 @@ class RSNAKneeDicomDataset(Dataset):
         return len(self.studies)
 
     def __getitem__(self, index):
-        import pydicom
         row = self.studies.iloc[index]
+        study_uid = str(row["StudyInstanceUID"])
         size = int(self.config["image_size"])
         slices = int(self.config["slices_per_series"])
         planes = tuple(self.config.get("planes", list(PLANE_NAMES)))
         output = torch.zeros(len(planes), slices, 1, size, size, dtype=torch.float32)
         mask = torch.zeros(len(planes), slices, dtype=torch.bool)
-        series_rows = self.metadata.series_for(row["StudyInstanceUID"], self.split)
+        series_rows = self.metadata.series_for(study_uid, self.split)
         for plane_index, plane in enumerate(planes):
             candidates = series_rows[series_rows["Anatomical_Plane"].astype(str).str.lower() == plane.lower()]
             if candidates.empty:
-                continue
+                raise ValueError(f"StudyInstanceUID={study_uid}: no {plane} series listed in the {self.split} metadata")
             series_uid = str(candidates.iloc[0]["SeriesInstanceUID"])
-            directory = self.metadata.dicom_series_dir(row["StudyInstanceUID"], series_uid, self.split)
-            files = sorted(directory.rglob("*")) if directory.is_dir() else []
-            datasets = []
-            for path in files:
-                if not path.is_file():
-                    continue
-                try:
-                    dataset = pydicom.dcmread(path, force=False)
-                    if hasattr(dataset, "pixel_array"):
-                        datasets.append((getattr(dataset, "InstanceNumber", 0), dataset.pixel_array))
-                except Exception:
-                    continue
-            datasets.sort(key=lambda item: item[0])
-            if not datasets:
-                continue
-            chosen = np.linspace(0, len(datasets) - 1, min(slices, len(datasets)), dtype=int)
+            # Malformed or unreadable series raise here (with both UIDs); nothing is skipped.
+            volume = load_series_volume(self.metadata, study_uid, series_uid, self.split)
+            chosen = np.linspace(0, volume.num_slices - 1, min(slices, volume.num_slices), dtype=int)
             for slice_index, source_index in enumerate(chosen):
-                image = torch.from_numpy(_normalize(datasets[source_index][1])).unsqueeze(0).unsqueeze(0)
+                image = torch.from_numpy(_normalize(volume.get_slice(int(source_index)))).unsqueeze(0).unsqueeze(0)
                 output[plane_index, slice_index] = F.interpolate(image, size=(size, size), mode="bilinear", align_corners=False)[0]
                 mask[plane_index, slice_index] = True
-        if not mask.any(dim=1).all():
-            raise ValueError(f"No readable DICOM slices for {row['StudyInstanceUID']}")
         labels = torch.tensor(row[list(TARGET_COLUMNS)].to_numpy(dtype=np.float32)) if self.split == "train" else torch.zeros(len(TARGET_COLUMNS))
         return {"images": output, "mask": mask, "labels": labels, "study_uid": str(row["StudyInstanceUID"])}
 

@@ -48,6 +48,13 @@ def _vector(ds, name: str, length: int, filename: str) -> np.ndarray:
     return values
 
 
+def _number(cast, value, name: str, filename: str):
+    try:
+        return cast(value)
+    except (TypeError, ValueError) as exc:
+        raise DicomSeriesError(f"{filename}: {name} {str(value)!r} is not a valid number: {exc}") from exc
+
+
 def _read_slices(directory: Path, files: List[Path]):
     slices, failures = [], []
     for path in files:
@@ -147,7 +154,7 @@ def load_dicom_series(
     missing = [p.name for p, ds, _ in slices if getattr(ds, "InstanceNumber", None) is None]
     if missing:
         raise DicomSeriesError("InstanceNumber is required for ordering but missing on:\n  " + _listing(missing))
-    numbers = [int(ds.InstanceNumber) for _, ds, _ in slices]
+    numbers = [_number(int, ds.InstanceNumber, "InstanceNumber", p.name) for p, ds, _ in slices]
     duplicates = {n: c for n, c in Counter(numbers).items() if c > 1}
     if duplicates:
         detail = [f"InstanceNumber {n}: " + ", ".join(nm for nm, k in zip(names, numbers) if k == n) for n in sorted(duplicates)]
@@ -190,8 +197,8 @@ def load_dicom_series(
     for attribute, label in (("SliceThickness", "Slice Thickness"), ("SpacingBetweenSlices", "Spacing Between Slices")):
         value = getattr(first, attribute, None)
         if value is not None and str(value).strip() != "":
-            metadata[label] = float(value)
-    spacings = [[float(v) for v in ds.PixelSpacing] for _, ds, _ in ordered if hasattr(ds, "PixelSpacing")]
+            metadata[label] = _number(float, value, attribute, ordered[0][0].name)
+    spacings = [_vector(ds, "PixelSpacing", 2, p.name).tolist() for p, ds, _ in ordered if hasattr(ds, "PixelSpacing")]
     if spacings:
         metadata["Pixel Spacing"] = spacings[0]
         if len(spacings) != len(ordered) or not np.allclose(spacings, spacings[0], rtol=1e-3):
@@ -199,10 +206,10 @@ def load_dicom_series(
     metadata.update(extra_metadata or {})
 
     volume = np.empty((len(ordered), *ordered[0][2].shape), dtype=np.float32)
-    for index, (_, ds, pixels) in enumerate(ordered):
+    for index, (path, ds, pixels) in enumerate(ordered):
         data = pixels.astype(np.float32)
-        slope = float(getattr(ds, "RescaleSlope", 1.0))
-        intercept = float(getattr(ds, "RescaleIntercept", 0.0))
+        slope = _number(float, getattr(ds, "RescaleSlope", 1.0), "RescaleSlope", path.name)
+        intercept = _number(float, getattr(ds, "RescaleIntercept", 0.0), "RescaleIntercept", path.name)
         volume[index] = data * slope + intercept if (slope != 1.0 or intercept != 0.0) else data
 
     return MRIVolume(data=volume, metadata=metadata, format_type="DICOM",
