@@ -1,7 +1,9 @@
 """Opt-in (--run-rsna): read-only checks against the one downloaded RSNA study.
 
-The MRIVolume-backed dataset must reproduce the previous reading algorithm (tests/legacy_rsna_reader.py)
-to within 1e-6, and the study must run through the model forward pass.
+Pixel reading (tests/legacy_rsna_reader.py) must still match to within 1e-6 once fed the same series;
+separately, series *selection* is now deterministic (select_series), not the old first-CSV-row pick,
+so the equivalence check below drives the legacy reader with select_series rather than its old default.
+The study must also still run through the model forward pass.
 """
 
 import json
@@ -14,7 +16,7 @@ pytest.importorskip("pandas")
 
 from torch.utils.data import DataLoader
 
-from mri_core.rsna_knee_dataset import TARGET_COLUMNS, load_rsna_metadata, load_series_volume
+from mri_core.rsna_knee_dataset import TARGET_COLUMNS, load_rsna_metadata, load_series_volume, select_series
 from mri_core.rsna_knee_model import RSNAKneeCNN
 from mri_core.rsna_knee_train import RSNAKneeDicomDataset, _normalize
 
@@ -46,10 +48,12 @@ def real():
 
 
 @pytest.mark.parametrize("config", CONFIGS.values(), ids=CONFIGS.keys())
-def test_dataset_output_matches_previous_reading_algorithm(real, config):
+def test_dataset_output_matches_previous_reading_algorithm_given_the_same_series(real, config):
+    """Pixel reading is unchanged: feeding the legacy reader the *same* select_series pick it must
+    match the dataset to <=1e-6. (Selection itself changed on purpose; see test_series_selection_*.)"""
     metadata, frame = real
     new = RSNAKneeDicomDataset(metadata, frame, config)[0]
-    old = legacy_item(metadata, frame.iloc[0], config)
+    old = legacy_item(metadata, frame.iloc[0], config, select=select_series)
     worst = float((new["images"] - old["images"]).abs().max())
     print(f"\nmax |new - previous| = {worst:.3e}  images {tuple(new['images'].shape)}  valid slices/plane {new['mask'].sum(1).tolist()}")
     assert new["images"].shape == old["images"].shape
@@ -57,6 +61,25 @@ def test_dataset_output_matches_previous_reading_algorithm(real, config):
     assert torch.equal(new["mask"], old["mask"])
     torch.testing.assert_close(new["labels"], old["labels"], rtol=0, atol=0, equal_nan=True)
     assert new["study_uid"] == old["study_uid"] == STUDY
+
+
+def test_series_selection_on_the_real_study_prefers_fluid_sensitive(real):
+    """Documents which real series the new rule picks, and where that differs from the old first-row pick."""
+    metadata, _ = real
+    naive = lambda candidates: str(candidates.iloc[0]["SeriesInstanceUID"])
+    rows = metadata.series_for(STUDY)
+    changed = []
+    for plane in ("Axial", "Coronal", "Sagittal"):
+        candidates = rows[rows["Anatomical_Plane"] == plane]
+        chosen, previous = select_series(candidates), naive(candidates)
+        chosen_row = candidates[candidates.SeriesInstanceUID.astype(str) == chosen].iloc[0]
+        print(f"\n{plane}: {len(candidates)} candidate(s); select_series -> ...{chosen[-6:]} "
+              f"(Fluid_Sensitive={int(chosen_row.Fluid_Sensitive)}); old first-row pick -> ...{previous[-6:]}"
+              + ("  [CHANGED]" if chosen != previous else ""))
+        assert bool(chosen_row.Fluid_Sensitive) or not (candidates.Fluid_Sensitive == 1).any()
+        if chosen != previous:
+            changed.append(plane)
+    assert changed == ["Coronal"]
 
 
 def test_every_slice_of_every_series_matches_previous_normalization(real):

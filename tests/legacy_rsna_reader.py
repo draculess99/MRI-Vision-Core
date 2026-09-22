@@ -30,7 +30,11 @@ def legacy_series_arrays(directory):
     return [array for _, array in datasets]
 
 
-def legacy_item(metadata, row, config, split="train"):
+def legacy_item(metadata, row, config, split="train", select=None):
+    """select(candidates) -> SeriesInstanceUID chooses the series per plane; defaults to the original
+    first-CSV-row pick so old callers keep testing the pre-selection-change behaviour verbatim.
+    """
+    select = select or (lambda candidates: str(candidates.iloc[0]["SeriesInstanceUID"]))
     size = int(config["image_size"])
     slices = int(config["slices_per_series"])
     planes = tuple(config.get("planes", list(PLANE_NAMES)))
@@ -41,7 +45,7 @@ def legacy_item(metadata, row, config, split="train"):
         candidates = series_rows[series_rows["Anatomical_Plane"].astype(str).str.lower() == plane.lower()]
         if candidates.empty:
             continue
-        series_uid = str(candidates.iloc[0]["SeriesInstanceUID"])
+        series_uid = select(candidates)
         arrays = legacy_series_arrays(metadata.dicom_series_dir(row["StudyInstanceUID"], series_uid, split))
         if not arrays:
             continue

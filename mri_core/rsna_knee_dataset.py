@@ -95,6 +95,20 @@ def load_rsna_metadata(data_dir: Path | str, dicom_root: Path | str | None = Non
                             None if dicom_root is None else Path(dicom_root))
 
 
+def select_series(candidates: pd.DataFrame) -> str:
+    """Deterministically pick one SeriesInstanceUID from a (study, plane) group of series rows.
+
+    Prefers Fluid_Sensitive=1; ties (or an all-non-fluid group) go to the lexicographically
+    smallest SeriesInstanceUID. CSV row order carries no meaning (see rsna_knee_dataset docs),
+    so the choice must not depend on it.
+    """
+    if candidates.empty:
+        raise ValueError("select_series: no candidate series given")
+    fluid = candidates[candidates["Fluid_Sensitive"] == 1]
+    pool = fluid if not fluid.empty else candidates
+    return str(pool["SeriesInstanceUID"].astype(str).min())
+
+
 def load_series_volume(metadata: RSNAKneeMetadata, study_uid: str, series_uid: str, split: str = "train") -> MRIVolume:
     """Load one RSNA series from its DICOMs as an ordered MRIVolume, cross-checked against the CSV metadata."""
     rows = metadata.series_for(study_uid, split)
