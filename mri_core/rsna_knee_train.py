@@ -13,7 +13,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from .rsna_knee_dataset import (PLANE_NAMES, TARGET_COLUMNS, RSNAKneeMetadata,
-                                load_series_volume, split_labeled_studies)
+                                load_series_volume, select_series, split_labeled_studies)
 from .rsna_knee_model import RSNAKneeCNN
 
 
@@ -72,7 +72,7 @@ class RSNAKneeDicomDataset(Dataset):
             candidates = series_rows[series_rows["Anatomical_Plane"].astype(str).str.lower() == plane.lower()]
             if candidates.empty:
                 raise ValueError(f"StudyInstanceUID={study_uid}: no {plane} series listed in the {self.split} metadata")
-            series_uid = str(candidates.iloc[0]["SeriesInstanceUID"])
+            series_uid = select_series(candidates)
             # Malformed or unreadable series raise here (with both UIDs); nothing is skipped.
             volume = load_series_volume(self.metadata, study_uid, series_uid, self.split)
             chosen = np.linspace(0, volume.num_slices - 1, min(slices, volume.num_slices), dtype=int)
