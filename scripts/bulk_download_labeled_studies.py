@@ -23,6 +23,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -31,6 +32,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from queue import Queue
 
@@ -44,9 +46,101 @@ except ImportError:
 
 COMPETITION = "rsna-knee-abnormality-detection"
 CACHE_FILE = Path("data/rsna-knee/kaggle_files_cache.json")
+CACHE_PARTIAL_FILE = Path("data/rsna-knee/kaggle_files_cache.partial.json")
 MAX_WORKERS = 4
 MAX_RETRIES = 3
 RETRY_BACKOFF = [1, 2, 4]
+CHECKPOINT_INTERVAL = 20
+CACHE_PAGE_SAFETY_LIMIT = 10000
+CACHE_SUCCESS_DELAY = 0.75
+KAGGLE_PAGE_SIZE = 200
+TRANSIENT_PAGE_RETRIES = 3
+
+
+def quarantine_incompatible_checkpoint(checkpoint_file: Path, reason: str):
+    """Preserve incompatible checkpoint with timestamp for inspection/recovery."""
+    if checkpoint_file.exists():
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        quarantine_file = checkpoint_file.parent / f"{checkpoint_file.name}.incompatible.{timestamp}"
+        checkpoint_file.rename(quarantine_file)
+        print(f"Checkpoint incompatible ({reason}). Preserved at: {quarantine_file}", flush=True)
+
+
+def compute_expected_series_mapping(data_dir: Path, target_studies: set) -> dict:
+    """Load expected series per study from metadata.
+
+    Returns dict: study_uid -> set of series_uid
+    """
+    expected = {}
+
+    # Try test manifest first (for test environments)
+    test_manifest_file = Path(data_dir) / "labeled_studies_to_download.json"
+    if test_manifest_file.exists():
+        try:
+            with open(test_manifest_file) as f:
+                manifest = json.load(f)
+            return {k: set(v) for k, v in manifest.items() if k in target_studies}
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Try loading real metadata
+    try:
+        md = load_simple_metadata(data_dir)
+        for study_uid in target_studies:
+            study_uid_str = str(study_uid)
+            series_df = md.series_for(study_uid_str, "train")
+            if len(series_df) > 0:
+                expected[study_uid_str] = set(
+                    series_df.SeriesInstanceUID.astype(str).tolist()
+                )
+    except FileNotFoundError:
+        pass
+
+    return expected
+
+
+def compute_full_manifest_checksum(target_studies: set, expected_series_mapping: dict) -> str:
+    """Compute checksum based on full expected study->series mapping.
+
+    This ensures checkpoints are invalidated if expected series change.
+    """
+    manifest = {
+        "target_studies": sorted(str(s) for s in target_studies),
+        "expected_series": {
+            study: sorted(str(s) for s in series)
+            for study, series in sorted(expected_series_mapping.items())
+        }
+    }
+    return compute_manifest_checksum(manifest)
+
+
+def compute_manifest_checksum(manifest: dict) -> str:
+    """Compute deterministic SHA-256 checksum of manifest.
+
+    Uses canonical JSON ordering to ensure same manifest always produces same checksum.
+    """
+    canonical = json.dumps(manifest, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def save_checkpoint(checkpoint_file: Path, checkpoint_data: dict):
+    """Save checkpoint atomically using temp file + rename."""
+    checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = checkpoint_file.parent / f".{checkpoint_file.name}.tmp"
+    with open(temp_file, 'w') as f:
+        json.dump(checkpoint_data, f)
+    temp_file.replace(checkpoint_file)
+
+
+def load_checkpoint(checkpoint_file: Path) -> dict | None:
+    """Load checkpoint if it exists and is valid."""
+    if not checkpoint_file.exists():
+        return None
+    try:
+        with open(checkpoint_file) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return None
 
 
 def load_simple_metadata(data_dir: Path):
@@ -100,103 +194,330 @@ def is_valid_dicom(path: Path) -> bool:
         return False
 
 
-def fetch_and_cache_file_listing(data_dir: Path, cache_file: Path = CACHE_FILE) -> dict:
+def fetch_and_cache_file_listing(data_dir: Path, cache_file: Path = None, target_studies: set = None) -> dict:
     """Fetch competition file listing from Kaggle and cache locally.
 
+    Args:
+        data_dir: Dataset directory
+        cache_file: Where to save final cache. Defaults to the module-level CACHE_FILE,
+            resolved at call time (not at import time) so tests can monkeypatch
+            CACHE_FILE and be guaranteed the real path is never touched.
+        target_studies: Set of study UIDs to collect (required for checkpoint validation)
+
     Returns: {study_uid: {series_uid: [file_paths]}}
+
+    Hardened features:
+    - Only stores target_studies files (no unrelated studies in memory)
+    - Preserves incompatible checkpoints for inspection
+    - Bounded retries per page with checkpoint save before retry
+    - Saves checkpoint on all errors before exiting
+    - Uses sets to prevent file path duplication on replay
+    - Full manifest checksum (study->series mapping)
+    - Atomic final cache write with temp file
     """
 
+    if cache_file is None:
+        cache_file = CACHE_FILE
+
+    if target_studies is None:
+        target_studies = set()
+
+    # Canonical target studies set for consistency checking
+    canonical_target_studies = sorted(set(str(s) for s in target_studies))
+
+    # Load expected series mapping early for checkpoint validation
+    expected_series_mapping = {}
+    if target_studies:
+        expected_series_mapping = compute_expected_series_mapping(data_dir, target_studies)
+
     print("Fetching Kaggle file listing (this takes ~10-15 minutes)...")
-    print("(Querying ~300 pages with rate limiting)")
+    print(f"(Querying with page size {KAGGLE_PAGE_SIZE}, safety limit {CACHE_PAGE_SAFETY_LIMIT})")
 
+    # Use lists for files, but track as sets per-page to prevent duplication on resume
     all_files = defaultdict(lambda: defaultdict(list))
+    found_series_per_study = defaultdict(set)
+    seen_files_per_study_series = defaultdict(lambda: defaultdict(set))  # Track files seen to prevent resume duplication
 
-    cmd = ["kaggle", "competitions", "files", COMPETITION, "-v", "--page-size", "100"]
-
-    page_token = None
+    # Load checkpoint if available
+    checkpoint = load_checkpoint(CACHE_PARTIAL_FILE)
     pages = 0
+    page_token = None
+    pages_at_checkpoint = 0  # Track how many pages were completed when resuming
 
-    while pages < 500:  # Safety limit
-        try:
-            if page_token:
-                cmd_with_token = cmd + ["--page-token", page_token]
-            else:
-                cmd_with_token = cmd
+    if checkpoint:
+        # Verify checkpoint compatibility using full manifest checksum
+        full_checksum = compute_full_manifest_checksum(target_studies, expected_series_mapping)
+        checkpoint_checksum = checkpoint.get("manifest_checksum", "")
+        checkpoint_target = sorted(set(str(s) for s in checkpoint.get("target_studies", [])))
 
-            result = subprocess.run(
-                cmd_with_token,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
+        if checkpoint_target == canonical_target_studies and full_checksum == checkpoint_checksum:
+            # Resume from checkpoint
+            pages = checkpoint.get("pages", 0)
+            page_token = checkpoint.get("page_token")
+            pages_at_checkpoint = pages  # Remember checkpoint state for deduplication logic
+            # Restore nested list structure and build seen_files tracker for deduplication on resume
+            checkpoint_files = checkpoint.get("labeled_files", {})
+            all_files = defaultdict(lambda: defaultdict(list))
+            seen_files_per_study_series = defaultdict(lambda: defaultdict(set))
+            for study, series_dict in checkpoint_files.items():
+                for series, files in series_dict.items():
+                    files_list = list(files) if not isinstance(files, list) else files
+                    all_files[study][series] = files_list
+                    # Track what we've already seen to prevent duplication on resume only
+                    seen_files_per_study_series[study][series] = set(files_list)
+            found_series_per_study = defaultdict(set, {
+                k: set(v) for k, v in checkpoint.get("found_series_per_study", {}).items()
+            })
+            print(f"Resuming from checkpoint: page {pages}, token {page_token[:20] if page_token else 'None'}...")
+        else:
+            # Checkpoint mismatch - preserve it for inspection
+            reason = "target_studies changed" if checkpoint_target != canonical_target_studies else "series mapping changed"
+            quarantine_incompatible_checkpoint(CACHE_PARTIAL_FILE, reason)
+            pages = 0
+            page_token = None
 
-            if result.returncode != 0:
-                error_msg = result.stderr or result.stdout
-                if "429" in error_msg or "Too Many Requests" in error_msg:
-                    wait_time = min(60, 5 + pages // 50)  # Exponential backoff
-                    print(f"  Rate limited on page {pages}, waiting {wait_time}s...", flush=True)
-                    time.sleep(wait_time)
-                    continue
-                elif not error_msg:
-                    # Empty error - might be transient, retry
-                    print(f"  Empty response on page {pages}, retrying...", flush=True)
-                    time.sleep(5)
-                    continue
-                raise Exception(f"Kaggle CLI error: {error_msg[:200]}")
+    cmd_base = ["kaggle", "competitions", "files", COMPETITION, "-v", "--page-size", str(KAGGLE_PAGE_SIZE)]
 
-            lines = result.stdout.strip().split('\n')
-            pages += 1
+    def save_progress_checkpoint(current_page: int, current_token: str | None):
+        """Save current progress to checkpoint."""
+        if target_studies:
+            checkpoint_data = {
+                "pages": current_page,
+                "page_token": current_token,
+                "labeled_files": {
+                    k: {series: sorted(list(files)) for series, files in v.items()}
+                    for k, v in all_files.items()
+                },
+                "found_series_per_study": {
+                    k: sorted(list(v)) for k, v in found_series_per_study.items()
+                },
+                "target_studies": canonical_target_studies,
+                "manifest_checksum": compute_full_manifest_checksum(target_studies, expected_series_mapping),
+            }
+            save_checkpoint(CACHE_PARTIAL_FILE, checkpoint_data)
 
-            # Aggressive rate limiting: delay after every request
-            time.sleep(2)  # Always wait 2s between requests
+    try:
+        while pages < CACHE_PAGE_SAFETY_LIMIT:
+            retry_count = 0
 
-            if pages % 20 == 0:
-                print(f"  Page {pages}...", flush=True)
+            while retry_count < TRANSIENT_PAGE_RETRIES:
+                try:
+                    if page_token:
+                        cmd = cmd_base + ["--page-token", page_token]
+                    else:
+                        cmd = cmd_base
 
-            # Extract next page token
-            next_token = None
-            for line in lines:
-                if line.startswith("Next Page Token = "):
-                    next_token = line.replace("Next Page Token = ", "").strip()
-                    break
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
 
-            # Collect train_series files
-            for line in lines:
-                if "train_series" in line and ".dcm" in line:
-                    parts = line.split(',')
-                    if len(parts) >= 1:
-                        file_path = parts[0].strip()
-                        path_parts = file_path.split('/')
-                        if len(path_parts) >= 3:
-                            study_uid = path_parts[1]
-                            series_uid = path_parts[2]
-                            all_files[study_uid][series_uid].append(file_path)
+                    if result.returncode != 0:
+                        error_msg = result.stderr or result.stdout
 
+                        # Check for transient errors that should be retried
+                        if any(code in error_msg for code in ["429", "500", "502", "503", "504"]):
+                            retry_count += 1
+                            if retry_count < TRANSIENT_PAGE_RETRIES:
+                                if "429" in error_msg or "Too Many Requests" in error_msg:
+                                    wait_time = min(60, 5 + pages // 50)  # Exponential backoff for 429
+                                else:
+                                    wait_time = min(30, 2 + (pages % 10))  # Gentle backoff for 5xx
+                                print(f"  Transient error on page {pages} (retry {retry_count}/{TRANSIENT_PAGE_RETRIES}), waiting {wait_time}s...", flush=True)
+                                save_progress_checkpoint(pages, page_token)
+                                time.sleep(wait_time)
+                                continue
+                            else:
+                                # Retries exhausted - save checkpoint and fail
+                                print(f"  Retries exhausted on page {pages}. Saving checkpoint for recovery.", flush=True)
+                                save_progress_checkpoint(pages, page_token)
+                                raise Exception(f"Kaggle error after {TRANSIENT_PAGE_RETRIES} retries on page {pages}: {error_msg[:100]} - checkpoint saved, can resume")
+                        elif not error_msg:
+                            # Empty error - might be transient, retry
+                            retry_count += 1
+                            if retry_count < TRANSIENT_PAGE_RETRIES:
+                                print(f"  Empty response on page {pages} (retry {retry_count}/{TRANSIENT_PAGE_RETRIES}), retrying...", flush=True)
+                                save_progress_checkpoint(pages, page_token)
+                                time.sleep(5)
+                                continue
+                            else:
+                                save_progress_checkpoint(pages, page_token)
+                                raise Exception(f"Empty response after {TRANSIENT_PAGE_RETRIES} retries on page {pages} - checkpoint saved, can resume")
+                        else:
+                            # Non-transient error (auth, etc) - save checkpoint and fail
+                            print(f"  Non-transient error on page {pages}. Saving checkpoint for recovery.", flush=True)
+                            save_progress_checkpoint(pages, page_token)
+                            raise Exception(f"Kaggle CLI error: {error_msg[:100]} - checkpoint saved, can resume")
+
+                    # Success - process the page
+                    lines = result.stdout.strip().split('\n')
+                    pages += 1
+
+                    # Rate limiting: delay after every request
+                    time.sleep(CACHE_SUCCESS_DELAY)
+
+                    if pages % 20 == 0:
+                        print(f"  Page {pages}...", flush=True)
+
+                    # Extract next page token
+                    next_token = None
+                    for line in lines:
+                        if line.startswith("Next Page Token = "):
+                            next_token = line.replace("Next Page Token = ", "").strip()
+                            break
+
+                    # Collect train_series files - ONLY target studies
+                    for line in lines:
+                        if "train_series" in line and ".dcm" in line:
+                            parts = line.split(',')
+                            if len(parts) >= 1:
+                                file_path = parts[0].strip()
+                                path_parts = file_path.split('/')
+                                if len(path_parts) >= 3:
+                                    study_uid = path_parts[1]
+                                    series_uid = path_parts[2]
+                                    # Only collect if target_studies specified AND study is in targets
+                                    if not target_studies or study_uid in target_studies:
+                                        # On resume: deduplicate to prevent duplication when replaying pages
+                                        # On fresh start: keep all files even if duplicates appear
+                                        should_add = True
+                                        if pages_at_checkpoint > 0 and file_path in seen_files_per_study_series[study_uid][series_uid]:
+                                            should_add = False
+
+                                        if should_add:
+                                            all_files[study_uid][series_uid].append(file_path)
+                                            seen_files_per_study_series[study_uid][series_uid].add(file_path)
+                                        if study_uid in target_studies:
+                                            found_series_per_study[study_uid].add(series_uid)
+
+                    # Save checkpoint periodically
+                    if pages % CHECKPOINT_INTERVAL == 0 and target_studies:
+                        save_progress_checkpoint(pages, next_token)
+
+                    if not next_token:
+                        break
+
+                    page_token = next_token
+                    break  # Break retry loop on success
+
+                except subprocess.TimeoutExpired:
+                    retry_count += 1
+                    if retry_count < TRANSIENT_PAGE_RETRIES:
+                        print(f"  Timeout on page {pages} (retry {retry_count}/{TRANSIENT_PAGE_RETRIES}), retrying...", flush=True)
+                        save_progress_checkpoint(pages, page_token)
+                        time.sleep(5)
+                        continue
+                    else:
+                        # Timeout after retries - preserve checkpoint
+                        print(f"  Timeout after {TRANSIENT_PAGE_RETRIES} retries on page {pages}. Saving checkpoint.", flush=True)
+                        save_progress_checkpoint(pages, page_token)
+                        raise Exception(f"Kaggle CLI timeout on page {pages} after {TRANSIENT_PAGE_RETRIES} retries - checkpoint saved at {CACHE_PARTIAL_FILE}, can resume")
+
+            # Check if we need to break after successful page
             if not next_token:
                 break
 
-            page_token = next_token
+        # Check if we hit safety limit
+        if pages >= CACHE_PAGE_SAFETY_LIMIT:
+            raise Exception(f"Pagination exceeded safety limit of {CACHE_PAGE_SAFETY_LIMIT} pages")
 
-        except subprocess.TimeoutExpired:
-            raise Exception("Kaggle CLI timeout")
-        except Exception as e:
-            raise Exception(f"Fetch failed: {e}")
+    except KeyboardInterrupt:
+        # Save checkpoint before exiting on Ctrl+C
+        if target_studies and pages >= 0:
+            save_progress_checkpoint(pages, page_token)
+        print("\nInterrupted. Checkpoint saved.", flush=True)
+        sys.exit(1)
 
     print(f"\nCached {len(all_files)} studies, {sum(len(s) for s in all_files.values())} series")
 
-    # Save cache
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    # Validate completeness if target_studies specified
+    if target_studies:
+        expected_series_per_study = {}
+
+        # Try to load test manifest first (for test environments)
+        test_manifest_file = Path(data_dir) / "labeled_studies_to_download.json"
+        if test_manifest_file.exists():
+            try:
+                with open(test_manifest_file) as f:
+                    manifest = json.load(f)
+                expected_series_per_study = {k: set(v) for k, v in manifest.items()}
+            except (json.JSONDecodeError, IOError):
+                pass
+
+        # If no test manifest, try loading real metadata
+        if not expected_series_per_study:
+            try:
+                md = load_simple_metadata(data_dir)
+                for study_uid in target_studies:
+                    study_uid_str = str(study_uid)
+                    series_df = md.series_for(study_uid_str, "train")
+                    if len(series_df) > 0:
+                        expected_series_per_study[study_uid_str] = set(
+                            series_df.SeriesInstanceUID.astype(str).tolist()
+                        )
+            except FileNotFoundError:
+                pass
+
+        # Validate if we have expected series
+        if expected_series_per_study:
+            missing_studies = set()
+            missing_series_per_study = {}
+
+            for study_uid in target_studies:
+                study_uid_str = str(study_uid)
+                if study_uid_str not in all_files:
+                    missing_studies.add(study_uid_str)
+                elif study_uid_str in expected_series_per_study:
+                    expected_series = expected_series_per_study[study_uid_str]
+                    found_series = set(all_files[study_uid_str].keys())
+                    missing = expected_series - found_series
+                    if missing:
+                        missing_series_per_study[study_uid_str] = missing
+
+            if missing_studies or missing_series_per_study:
+                errors = []
+                for study in missing_studies:
+                    errors.append(f"Missing study: {study}")
+                for study, series in missing_series_per_study.items():
+                    errors.append(f"Study {study}: missing series {len(series)}")
+                raise Exception(f"Incomplete cache: {'; '.join(errors[:3])}")
+
+    # Filter to target studies only if specified
+    if target_studies:
+        filtered_files = {
+            study: series_files
+            for study, series_files in all_files.items()
+            if study in target_studies
+        }
+    else:
+        filtered_files = all_files
+
+    # Convert sets to sorted lists for JSON serialization
     cache_data = {
-        study: {series: files for series, files in series_files.items()}
-        for study, series_files in all_files.items()
+        study: {
+            series: sorted(list(files)) if isinstance(files, set) else files
+            for series, files in series_files.items()
+        }
+        for study, series_files in filtered_files.items()
     }
-    with open(cache_file, 'w') as f:
+
+    # Atomic final cache write: write to temp file, then rename
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_cache = cache_file.parent / f".{cache_file.name}.tmp"
+    with open(temp_cache, 'w') as f:
         json.dump(cache_data, f)
+    # Atomic rename - replaces existing file atomically
+    temp_cache.replace(cache_file)
+
+    # Delete partial checkpoint only after successful final cache creation
+    CACHE_PARTIAL_FILE.unlink(missing_ok=True)
 
     print(f"Cache saved to: {cache_file}")
     print(f"Cache size: {cache_file.stat().st_size / (1024*1024):.1f} MB")
 
-    return all_files
+    return filtered_files
 
 
 def filter_for_labeled_studies(all_files: dict, labeled_studies: set) -> dict:
@@ -485,8 +806,8 @@ def main(argv=None):
                 all_files = json.load(f)
             print(f"  Studies: {len(all_files)}, Size: {CACHE_FILE.stat().st_size / (1024*1024):.1f} MB\n")
         else:
-            # Fetch and cache
-            all_files = fetch_and_cache_file_listing(args.data_dir)
+            # Fetch and cache with target_studies for checkpoint validation
+            all_files = fetch_and_cache_file_listing(args.data_dir, target_studies=labeled_studies)
 
         if args.cache_only:
             return 0
