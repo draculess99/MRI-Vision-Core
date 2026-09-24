@@ -115,6 +115,7 @@ def generate_decision_report(
     mask: np.ndarray,
     features: Dict[str, Any],
     num_slices: int,
+    model_predictions: Optional[Dict[str, float]] = None,
 ) -> DecisionReport:
     """Generate a decision report from processing pipeline outputs.
 
@@ -127,10 +128,25 @@ def generate_decision_report(
         mask: Segmentation mask
         features: Features extracted by extract_features()
         num_slices: Number of slices in volume
+        model_predictions: Optional {target_name: probability} dict, each value finite
+            and in [0.0, 1.0]. When omitted, the report's model_status/model_predictions
+            keep their "no checkpoint loaded" defaults. When supplied, it is stored
+            as-is (target names unchanged) and model_status is updated to a neutral
+            "predictions available" message. This never affects the OK/REVIEW/INVALID
+            image-quality status below, which is computed independently of model output.
 
     Returns:
         DecisionReport with quality assessment and pipeline status
+
+    Raises:
+        ValueError: If model_predictions contains a non-finite value or one outside [0.0, 1.0].
     """
+    if model_predictions is not None:
+        for target, probability in model_predictions.items():
+            if not np.isfinite(probability):
+                raise ValueError(f"model_predictions[{target!r}] is not finite: {probability!r}")
+            if not (0.0 <= probability <= 1.0):
+                raise ValueError(f"model_predictions[{target!r}] must be in [0.0, 1.0], got {probability!r}")
     # Extract image dimensions
     if len(preprocessed_data.shape) == 3:
         _, height, width = preprocessed_data.shape
@@ -235,7 +251,7 @@ def generate_decision_report(
         flags.append("No contours detected in mask")
         details["contours"] = "Segmentation may be fragmented or noisy"
 
-    return DecisionReport(
+    report_kwargs = dict(
         study_uid=study_uid,
         series_uid=series_uid,
         plane=plane,
@@ -249,3 +265,8 @@ def generate_decision_report(
         quality_flags=flags,
         quality_details=details,
     )
+    if model_predictions is not None:
+        report_kwargs["model_predictions"] = dict(model_predictions)
+        report_kwargs["model_status"] = "Model checkpoint loaded — predictions available"
+
+    return DecisionReport(**report_kwargs)

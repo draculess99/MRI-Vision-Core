@@ -411,3 +411,106 @@ class TestGenerateDecisionReport:
         assert report.image_width == 64
         if 64 < MIN_IMAGE_DIMENSION:
             assert report.quality_status == QualityStatus.REVIEW
+
+
+class TestModelPredictionsParameter:
+    """Tests for the optional model_predictions parameter added for inference wiring."""
+
+    def create_ok_data(self):
+        """Data that produces a clean OK quality status, so model_predictions'
+        independence from image-quality logic is unambiguous."""
+        volume = np.random.rand(10, 256, 256).astype(np.float32) * 200 + 50
+        preprocessed = np.linspace(50, 200, 256 * 256).reshape(256, 256).astype(np.uint8)
+        mask = np.zeros((256, 256), dtype=np.uint8)
+        mask[50:200, 50:200] = 255
+        features = {
+            "image_width": 256,
+            "image_height": 256,
+            "mean_intensity": 125.0,
+            "std_deviation": 50.0,
+            "min_intensity": 50.0,
+            "max_intensity": 200.0,
+            "foreground_pixels": 150 * 150,
+            "foreground_percentage": 36.0,
+            "largest_contour_area": 22000.0,
+            "bounding_rect": (50, 50, 150, 150),
+        }
+        return volume, preprocessed, mask, features
+
+    def test_omitted_model_predictions_preserves_existing_behavior(self):
+        """model_predictions=None (the default) must reproduce the exact prior defaults."""
+        volume, preprocessed, mask, features = self.create_ok_data()
+        report = generate_decision_report(
+            study_uid="test_study", series_uid="test_series", plane="Axial",
+            volume_data=volume, preprocessed_data=preprocessed, mask=mask,
+            features=features, num_slices=10,
+        )
+        assert report.model_predictions is None
+        assert report.model_status == "Not available — model checkpoint not loaded"
+
+    def test_valid_prediction_dict_is_stored(self):
+        volume, preprocessed, mask, features = self.create_ok_data()
+        predictions = {target: 0.5 for target in [
+            "ACL", "MCL", "Medial Meniscus", "Lateral Meniscus", "Medial OA",
+            "Lateral OA", "PF OA", "Effusion", "Synovitis", "Baker's", "Contusion", "Fracture",
+        ]}
+        report = generate_decision_report(
+            study_uid="test_study", series_uid="test_series", plane="Axial",
+            volume_data=volume, preprocessed_data=preprocessed, mask=mask,
+            features=features, num_slices=10, model_predictions=predictions,
+        )
+        assert report.model_predictions == predictions
+        assert report.model_status == "Model checkpoint loaded — predictions available"
+
+    def test_probability_below_zero_rejected(self):
+        volume, preprocessed, mask, features = self.create_ok_data()
+        with pytest.raises(ValueError):
+            generate_decision_report(
+                study_uid="test_study", series_uid="test_series", plane="Axial",
+                volume_data=volume, preprocessed_data=preprocessed, mask=mask,
+                features=features, num_slices=10, model_predictions={"ACL": -0.1},
+            )
+
+    def test_probability_above_one_rejected(self):
+        volume, preprocessed, mask, features = self.create_ok_data()
+        with pytest.raises(ValueError):
+            generate_decision_report(
+                study_uid="test_study", series_uid="test_series", plane="Axial",
+                volume_data=volume, preprocessed_data=preprocessed, mask=mask,
+                features=features, num_slices=10, model_predictions={"ACL": 1.1},
+            )
+
+    def test_nan_probability_rejected(self):
+        volume, preprocessed, mask, features = self.create_ok_data()
+        with pytest.raises(ValueError):
+            generate_decision_report(
+                study_uid="test_study", series_uid="test_series", plane="Axial",
+                volume_data=volume, preprocessed_data=preprocessed, mask=mask,
+                features=features, num_slices=10, model_predictions={"ACL": float("nan")},
+            )
+
+    def test_inf_probability_rejected(self):
+        volume, preprocessed, mask, features = self.create_ok_data()
+        with pytest.raises(ValueError):
+            generate_decision_report(
+                study_uid="test_study", series_uid="test_series", plane="Axial",
+                volume_data=volume, preprocessed_data=preprocessed, mask=mask,
+                features=features, num_slices=10, model_predictions={"ACL": float("inf")},
+            )
+
+    def test_model_predictions_do_not_alter_quality_status(self):
+        """Same underlying image data must yield the same quality_status regardless
+        of whether (or what) model_predictions are supplied."""
+        volume, preprocessed, mask, features = self.create_ok_data()
+        without_predictions = generate_decision_report(
+            study_uid="test_study", series_uid="test_series", plane="Axial",
+            volume_data=volume, preprocessed_data=preprocessed, mask=mask,
+            features=features, num_slices=10,
+        )
+        with_predictions = generate_decision_report(
+            study_uid="test_study", series_uid="test_series", plane="Axial",
+            volume_data=volume, preprocessed_data=preprocessed, mask=mask,
+            features=features, num_slices=10, model_predictions={"ACL": 0.9, "Fracture": 0.1},
+        )
+        assert without_predictions.quality_status == with_predictions.quality_status
+        assert without_predictions.quality_flags == with_predictions.quality_flags

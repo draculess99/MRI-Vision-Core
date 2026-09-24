@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -11,6 +13,11 @@ from mri_core.rsna_integration import (
     get_available_planes, load_rsna_study_series, RSNADiscoveryError, RSNAStudyNotAvailable
 )
 from mri_core.decision import generate_decision_report
+from mri_core.rsna_knee_inference import run_inference, RSNAInferenceError
+
+# Checkpoint location matches configs/rsna_knee.json's "checkpoint_path". No checkpoint
+# is expected to exist yet; the RSNA viewer remains fully usable without one.
+RSNA_CHECKPOINT_PATH = Path("outputs/rsna-knee/checkpoint_best.pt")
 
 st.set_page_config(page_title="MRI Vision Core", layout="wide")
 
@@ -178,6 +185,17 @@ if volume is not None:
                 st.divider()
                 st.subheader("Quality Assessment Report")
 
+                model_predictions = None
+                if RSNA_CHECKPOINT_PATH.is_file():
+                    try:
+                        model_predictions = run_inference(
+                            metadata=metadata,
+                            checkpoint_path=RSNA_CHECKPOINT_PATH,
+                            study_uid=study_metadata["study_uid"],
+                        )
+                    except RSNAInferenceError as e:
+                        st.warning(f"Model inference unavailable for this study: {e}")
+
                 try:
                     decision_report = generate_decision_report(
                         study_uid=study_metadata["study_uid"],
@@ -188,6 +206,7 @@ if volume is not None:
                         mask=results["mask"],
                         features=features,
                         num_slices=study_metadata["num_slices"],
+                        model_predictions=model_predictions,
                     )
 
                     # Display report summary
@@ -226,6 +245,14 @@ if volume is not None:
 
                     # Model status
                     st.info(f"**Model Status:** {decision_report.model_status}")
+
+                    if decision_report.model_predictions is not None:
+                        st.caption("Model outputs are experimental probabilities and are not a clinical diagnosis.")
+                        predictions_df = pd.DataFrame(
+                            list(decision_report.model_predictions.items()),
+                            columns=["Target", "Probability"],
+                        )
+                        st.dataframe(predictions_df, use_container_width=True, hide_index=True)
 
                 except Exception as e:
                     st.error(f"Error generating decision report: {e}")

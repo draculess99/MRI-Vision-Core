@@ -18,6 +18,8 @@ from mri_core.rsna_integration import (
     RSNADiscoveryError,
     RSNAStudyNotAvailable,
 )
+from mri_core.pipeline import process_mri_image
+from mri_core.decision import generate_decision_report
 
 pytestmark = pytest.mark.rsna
 
@@ -146,3 +148,121 @@ class TestIncompleteDownloadHandling:
 
         planes = get_available_planes(tmp_path, metadata, fake_study_uid)
         assert planes == []
+
+
+class TestModelInferenceIntegration:
+    """Mirrors app.py's exact RSNA-viewer flow: load study -> process -> (maybe) run
+    inference -> generate_decision_report -> display. Exercised at the function level
+    since app.py itself requires a live Streamlit ScriptRunContext to execute end to end."""
+
+    @staticmethod
+    def _load_and_process_first_available_study():
+        if not (RSNA_ROOT / "train.csv").is_file():
+            pytest.skip("RSNA data directory not found")
+        metadata = load_rsna_metadata_safe(RSNA_ROOT)
+        studies = discover_available_studies(RSNA_ROOT, metadata)
+        if not studies:
+            pytest.skip("No downloaded RSNA studies available")
+        study_uid = studies[0]
+        planes = get_available_planes(RSNA_ROOT, metadata, study_uid)
+        if not planes:
+            pytest.skip("No available planes for the first downloaded study")
+        volume, meta = load_rsna_study_series(RSNA_ROOT, metadata, study_uid, planes[0])
+        display_slice = volume.get_display_slice(volume.default_slice_index)
+        results = process_mri_image(display_slice, segmentation_method="otsu", is_mri=True, is_inverted=volume.is_inverted)
+        return metadata, volume, meta, results
+
+    def test_no_checkpoint_preserves_not_available_behavior(self, tmp_path):
+        """Matches app.py's `if RSNA_CHECKPOINT_PATH.is_file(): ... else: model_predictions stays None`."""
+        metadata, volume, meta, results = self._load_and_process_first_available_study()
+        checkpoint_path = tmp_path / "does_not_exist.pt"
+        model_predictions = None
+        if checkpoint_path.is_file():
+            pytest.fail("checkpoint_path must not exist for this test")
+
+        report = generate_decision_report(
+            study_uid=meta["study_uid"], series_uid=meta["series_uid"], plane=meta["plane"],
+            volume_data=volume.raw_data, preprocessed_data=results["preprocessed"], mask=results["mask"],
+            features=results["features"], num_slices=meta["num_slices"], model_predictions=model_predictions,
+        )
+        assert report.model_predictions is None
+        assert report.model_status == "Not available — model checkpoint not loaded"
+
+    def test_valid_temporary_checkpoint_produces_probability_table(self, tmp_path):
+        """A real (synthetic-weights) checkpoint matching RSNAKneeCNN's architecture must
+        produce a full 12-target probability dict, renderable as the app's Target/Probability table."""
+        torch = pytest.importorskip("torch")
+        pytest.importorskip("pandas")
+        import pandas as pd
+        from mri_core.rsna_knee_model import RSNAKneeCNN
+        from mri_core.rsna_knee_dataset import TARGET_COLUMNS
+        from mri_core.rsna_knee_inference import run_inference, RSNAInferenceError
+
+        metadata, volume, meta, results = self._load_and_process_first_available_study()
+
+        checkpoint_path = tmp_path / "ckpt.pt"
+        model = RSNAKneeCNN(num_planes=3, dropout=0.0)
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "config": {"image_size": 64, "slices_per_series": 4, "planes": ["Axial", "Coronal", "Sagittal"], "dropout": 0.0},
+                "target_columns": list(TARGET_COLUMNS),
+            },
+            checkpoint_path,
+        )
+
+        model_predictions = None
+        try:
+            model_predictions = run_inference(metadata=metadata, checkpoint_path=checkpoint_path, study_uid=meta["study_uid"])
+        except RSNAInferenceError as e:
+            pytest.skip(f"Study not suitable for this checkpoint's config: {e}")
+
+        report = generate_decision_report(
+            study_uid=meta["study_uid"], series_uid=meta["series_uid"], plane=meta["plane"],
+            volume_data=volume.raw_data, preprocessed_data=results["preprocessed"], mask=results["mask"],
+            features=results["features"], num_slices=meta["num_slices"], model_predictions=model_predictions,
+        )
+        assert report.model_predictions is not None
+        assert len(report.model_predictions) == 12
+        predictions_df = pd.DataFrame(list(report.model_predictions.items()), columns=["Target", "Probability"])
+        assert list(predictions_df.columns) == ["Target", "Probability"]
+        assert len(predictions_df) == 12
+
+    def test_inference_exception_produces_warning_not_crash(self, tmp_path):
+        """A checkpoint with mismatched target_columns must be caught (RSNAInferenceError),
+        leaving model_predictions None and the deterministic quality report still generated."""
+        torch = pytest.importorskip("torch")
+        from mri_core.rsna_knee_model import RSNAKneeCNN
+        from mri_core.rsna_knee_inference import run_inference, RSNAInferenceError
+
+        metadata, volume, meta, results = self._load_and_process_first_available_study()
+
+        checkpoint_path = tmp_path / "bad_ckpt.pt"
+        model = RSNAKneeCNN(num_planes=3, dropout=0.0)
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "config": {"image_size": 64, "slices_per_series": 4, "planes": ["Axial", "Coronal", "Sagittal"], "dropout": 0.0},
+                "target_columns": ["abnormal", "acl", "meniscus"],  # wrong schema entirely
+            },
+            checkpoint_path,
+        )
+
+        model_predictions = None
+        warning_raised = False
+        try:
+            model_predictions = run_inference(metadata=metadata, checkpoint_path=checkpoint_path, study_uid=meta["study_uid"])
+        except RSNAInferenceError:
+            warning_raised = True  # This is exactly what app.py's `except RSNAInferenceError as e: st.warning(...)` does.
+
+        assert warning_raised is True
+        assert model_predictions is None
+
+        # The deterministic quality report must still be produced (app does not crash).
+        report = generate_decision_report(
+            study_uid=meta["study_uid"], series_uid=meta["series_uid"], plane=meta["plane"],
+            volume_data=volume.raw_data, preprocessed_data=results["preprocessed"], mask=results["mask"],
+            features=results["features"], num_slices=meta["num_slices"], model_predictions=model_predictions,
+        )
+        assert report.quality_status is not None
+        assert report.model_predictions is None
