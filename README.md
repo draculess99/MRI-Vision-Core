@@ -4,6 +4,10 @@ Python/OpenCV MRI exploration with a Streamlit UI, Stanford MRNet label integrat
 
 Research and educational prototype. Not for medical diagnosis or clinical decision-making.
 
+> **Model-safety notice.** The Streamlit app can display experimental CNN probabilities for RSNA knee MRI studies. The only checkpoint that has been produced is a **smoke-test checkpoint**: it was trained for a few seconds on 3 training studies solely to validate the end-to-end software pipeline. Its predictions are **not a measure of clinical performance**, are not clinically meaningful, and are not a diagnosis. No sensitivity, specificity, accuracy, or clinical validation exists for any RSNA model in this repository.
+
+See the [Visual walkthrough](#visual-walkthrough) for screenshots of the current application.
+
 ## Milestones
 
 - **V0.1 completed:** Standard image loading, OpenCV preprocessing, threshold segmentation, overlays, and image features.
@@ -17,7 +21,7 @@ The Streamlit application (`app.py`) uses the existing slice-processing core:
 
 `loader.py` / `dataset_discovery.py` → `mri_volume.py` → `preprocessing.py` → `segmentation.py` → `features.py` / `visualization.py`, orchestrated by `pipeline.py`.
 
-Supported inputs include DICOM, NIfTI, PNG/JPG, and MRNet NumPy volumes. The UI provides plane/exam selection, slice navigation, technical metadata, Otsu/adaptive masks, and overlays. Predictive modeling runs through a separate CLI:
+Supported inputs include DICOM, NIfTI, PNG/JPG, and MRNet NumPy volumes. The UI provides plane/exam selection, slice navigation, technical metadata, Otsu/adaptive masks, and overlays. The MRNet handcrafted-feature baseline runs through a separate CLI, while the experimental RSNA CNN inference path is integrated into the Streamlit app (see [Current application architecture](#current-application-architecture-rsna-workflow) below):
 
 | Module | Responsibility |
 |---|---|
@@ -25,6 +29,146 @@ Supported inputs include DICOM, NIfTI, PNG/JPG, and MRNet NumPy volumes. The UI 
 | `mri_core/manifest.py` | ID-based joins, plane availability, separate external image paths, missing/ambiguous image checks |
 | `mri_core/baseline_features.py` | Read-only sampled-slice handcrafted features |
 | `mri_core/baseline.py` | Train-only fitting, held-out metrics, reproducible CLI and reports |
+
+### Current application architecture (RSNA workflow)
+
+The Streamlit app's **Explore RSNA Studies** mode runs two independent paths from the same DICOM volume and presents them side by side. The **deterministic path** (blue) uses classical image processing with no learned weights and produces the image-quality status. The **experimental path** (orange) is an optional CNN that outputs 12 probabilities. The two paths only meet in the `DecisionReport` container, which stores them in separate fields.
+
+```mermaid
+flowchart TD
+    A["RSNA DICOM Study<br/>local files, read-only"] --> B["Study + Plane Selection<br/>Streamlit sidebar"]
+    B --> C["Multi-slice MRI Volume<br/>ordered DICOM series"]
+
+    subgraph DET["DETERMINISTIC PATH - image processing and quality, no learned weights"]
+        D["MRI-aware Preprocessing<br/>selected slice"] --> E["Segmentation<br/>Otsu or adaptive threshold + morphology"]
+        E --> F["Overlay"]
+        E --> G["Deterministic Image Features<br/>intensity stats, foreground, contours"]
+        G --> H["Quality Assessment<br/>Quality Status: OK / REVIEW / INVALID"]
+    end
+
+    subgraph EXP["EXPERIMENTAL PATH - optional CNN, opt-in smoke checkpoint only"]
+        I["3-Plane Model Input<br/>Axial / Coronal / Sagittal<br/>up to 9 sampled slices per plane, 128x128"] --> J["RSNAKneeCNN"]
+        J --> K["12 logits"]
+        K --> L["Sigmoid probabilities<br/>12 ordered study-level targets"]
+    end
+
+    C --> D
+    C --> I
+    H --> M["DecisionReport<br/>quality_status and model_predictions<br/>are separate fields"]
+    L --> M
+    M --> N["Streamlit UI<br/>quality report and experimental probabilities shown together"]
+    P["Research and educational prototype.<br/>Not for medical diagnosis or clinical decision-making."]
+    N --- P
+
+    classDef det fill:#bfdcff,stroke:#1f4e79,color:#000000
+    classDef exp fill:#ffd9a0,stroke:#9c5a00,color:#000000
+    classDef shared fill:#c9ecc4,stroke:#2e6b2a,color:#000000
+    classDef warn fill:#ffc9c9,stroke:#a10000,color:#000000
+    class D,E,F,G,H det
+    class I,J,K,L exp
+    class A,B,C,M,N shared
+    class P warn
+    style DET fill:#eef6ff,stroke:#1f4e79,color:#000000
+    style EXP fill:#fff4e2,stroke:#9c5a00,color:#000000
+```
+
+What the diagram means in the current implementation:
+
+- **The quality path never sees the model.** Quality Status is computed only from the processed image, its measurements, and volume-level checks. CNN probabilities are validated (finite, within 0-1) and stored next to the status, but they cannot change it.
+- **The model path does not use the 2D preprocessing or segmentation.** Model input is built directly from the DICOM series by the training dataset class, which applies its own per-slice normalization (1st/99th percentile clip) and bilinear resize.
+- **Inference is study-level.** All three planes are used regardless of which plane is being viewed; each plane contributes one series (fluid-sensitive preferred, lowest `SeriesInstanceUID` as the tie-break). Up to 9 slices per plane are sampled at evenly spaced positions; shorter series use all their slices.
+- **The model produces 12 ordered study-level binary targets** as raw logits, converted to probabilities with one sigmoid each: `ACL`, `MCL`, `Medial Meniscus`, `Lateral Meniscus`, `Medial OA`, `Lateral OA`, `PF OA`, `Effusion`, `Synovitis`, `Baker's`, `Contusion`, `Fracture`.
+- **Streamlit presents both paths together**, and the CNN path degrades gracefully: with no checkpoint, an incomplete study, or an incompatible checkpoint, the app shows a non-fatal message and still renders the full quality report.
+
+| Stage | Implementation |
+|---|---|
+| Study and plane discovery (read-only, tolerant of partial downloads) | `mri_core/rsna_integration.py` |
+| DICOM series to ordered volume | `mri_core/dicom_series.py`, `mri_core/mri_volume.py`, `load_series_volume` / `select_series` in `mri_core/rsna_knee_dataset.py` |
+| Preprocessing, segmentation, overlay, features | `mri_core/preprocessing.py`, `segmentation.py`, `visualization.py`, `features.py`, orchestrated by `pipeline.py` |
+| Deterministic quality assessment and report container | `mri_core/decision.py` (`DecisionReport`, `generate_decision_report`) |
+| Three-plane model input | `RSNAKneeDicomDataset` in `mri_core/rsna_knee_train.py` |
+| Model | `RSNAKneeCNN` in `mri_core/rsna_knee_model.py` (shared encoder from `mri_core/cnn_model.py`, 3 planes, 12 outputs, 102,012 parameters) |
+| Single-study inference | `run_inference` in `mri_core/rsna_knee_inference.py` (CPU, `model.eval()`, `torch.inference_mode()`, validated checkpoint) |
+| UI | `app.py` |
+
+**Deterministic quality assessment.** `generate_decision_report` evaluates the displayed slice after preprocessing and segmentation, plus volume-level facts. The status describes image and pipeline quality only and is never a clinical statement:
+
+| Status | Meaning |
+|---|---|
+| `OK` | No quality rule was triggered. |
+| `REVIEW` | At least one rule was triggered: foreground fraction outside 5-95%, intensity range below 10, fewer than 3 slices, image dimensions outside 64-4096 px, or foreground pixels without any contour. |
+| `INVALID` | The volume contains no finite values. |
+
+The thresholds are named constants in `mri_core/decision.py`. Threshold segmentation is not medically validated.
+
+#### Experimental smoke checkpoint
+
+- **Purpose.** It exists only to validate the end-to-end software path: local study, model input, checkpoint loading, inference, `DecisionReport`, and Streamlit display.
+- **Provenance.** It was trained on CPU for a few seconds using the only 5 fully downloaded labeled studies at the time (3 for training, 2 for validation, 3 epochs). Only the epoch-1 weights were kept, and the validation ROC-AUC from 2 studies is uninformative. It is not a diagnostic or competitively trained model.
+- **Availability.** It is generated locally under the git-ignored `outputs/` directory (`outputs/rsna-knee-smoke/checkpoint_smoke.pt`) and is not distributed with the repository. Without it, the app shows `Not available — model checkpoint not loaded`.
+- **Opt-in only.** The sidebar checkbox **Use experimental smoke-test checkpoint** is off by default. Enabling it never overwrites or falls back to the normal checkpoint path (`outputs/rsna-knee/checkpoint_best.pt`), and the UI shows: *Experimental smoke-test model — trained on only 3 studies; outputs are not clinically meaningful and are not a diagnosis.*
+- **Data scarcity.** Only 58 studies in the RSNA metadata have any labels (see the RSNA adapter section), so any RSNA model trained on this data would rest on at most 58 studies.
+
+## Visual walkthrough
+
+The screenshots below are from the current app running against a locally downloaded RSNA knee MRI study (Explore RSNA Studies mode).
+
+**Workflow**
+
+1. Select a locally available RSNA knee DICOM study.
+2. Select the Axial, Coronal, or Sagittal plane.
+3. Load the multi-slice DICOM volume.
+4. Apply MRI-aware preprocessing to the selected slice.
+5. Generate the segmentation mask and overlay visualization.
+6. Extract deterministic image features.
+7. Optionally enable the experimental smoke checkpoint.
+8. Build the three-plane model input from sampled slices.
+9. Run `RSNAKneeCNN`.
+10. Convert the 12 logits into probabilities.
+11. Generate the deterministic Quality Assessment Report independently of the model.
+12. Present processing, inference, and quality results together in Streamlit.
+
+### 1. RSNA DICOM Study Selection
+
+![RSNA DICOM Study Selection](docs/images/01-rsna-dicom-study-selection.png)
+
+*RSNA DICOM Study Selection — Real knee MRI study exploration with plane selection, multi-slice DICOM loading, and the full preprocessing/segmentation workflow visible in a single view.*
+
+### 2. MRI Processing Pipeline
+
+![MRI Processing Pipeline](docs/images/02-original-preprocessed-mask-overlay.png)
+
+*MRI Processing Pipeline — Original axial DICOM slice, MRI-aware preprocessing, deterministic segmentation mask, and overlay visualization shown in a compact 2×2 workflow.*
+
+### 3. Deterministic Image Features
+
+![Deterministic Image Features](docs/images/03-deterministic-image-features.png)
+
+*Deterministic Image Features — Reproducible measurements extracted from the processed MRI slice, including intensity statistics, foreground coverage, contour area, and bounding geometry.*
+
+### 4. 12-Target RSNA Model Inference
+
+![12-Target RSNA Model Inference](docs/images/04-12-target-rsna-inference.png)
+
+*12-Target RSNA Model Inference — Experimental three-plane CNN outputs probabilities for 12 knee abnormality targets, with explicit smoke-test and non-diagnostic warnings.*
+
+The probabilities shown come from the development smoke checkpoint and demonstrate the inference plumbing only. They are not a measure of clinical performance and must not be read as findings, risks, or predictions about the patient. The smoke checkpoint exists to validate the end-to-end software pipeline; its outputs are not clinically meaningful.
+
+### 5. Deterministic Quality Assessment
+
+![Deterministic Quality Assessment](docs/images/05-deterministic-quality-assessment.png)
+
+*Deterministic Quality Assessment — Independent image-quality status and technical metrics remain separate from experimental model predictions, supporting transparent and auditable MRI processing.*
+
+Quality Status is generated from deterministic image and processing checks (foreground coverage, intensity range, slice count, image size, contour detection, and finite values). It is not changed by the CNN probability outputs: the same study produces the same status whether or not a checkpoint is loaded.
+
+### 6. MRI Vision Core End-to-End
+
+![MRI Vision Core End-to-End](docs/images/06-mri-vision-core-end-to-end.png)
+
+*MRI Vision Core End-to-End — RSNA DICOM study selection, preprocessing, segmentation, feature extraction, experimental 12-target inference, and deterministic quality assessment integrated into a single Streamlit workflow.*
+
+> Research and educational prototype. Not for medical diagnosis or clinical decision-making. The smoke checkpoint exists to validate the end-to-end software pipeline; its predictions are not a measure of clinical performance.
 
 ## Setup and execution
 
