@@ -18,6 +18,10 @@ from mri_core.rsna_knee_inference import run_inference, RSNAInferenceError
 # Checkpoint location matches configs/rsna_knee.json's "checkpoint_path". No checkpoint
 # is expected to exist yet; the RSNA viewer remains fully usable without one.
 RSNA_CHECKPOINT_PATH = Path("outputs/rsna-knee/checkpoint_best.pt")
+# The smoke checkpoint is used only when the user explicitly enables it; it never replaces RSNA_CHECKPOINT_PATH.
+RSNA_SMOKE_CHECKPOINT_PATH = Path("outputs/rsna-knee-smoke/checkpoint_smoke.pt")
+RSNA_SMOKE_WARNING = ("Experimental smoke-test model — trained on only 3 studies; "
+                      "outputs are not clinically meaningful and are not a diagnosis.")
 
 st.set_page_config(page_title="MRI Vision Core", layout="wide")
 
@@ -50,6 +54,7 @@ volume = None
 status_msg = ""
 decision_report = None
 study_metadata = {}
+use_smoke_checkpoint = False
 
 if data_source == "Upload File":
     uploaded_file = st.sidebar.file_uploader(
@@ -69,6 +74,12 @@ if data_source == "Upload File":
 elif data_source == "Explore RSNA Studies":
     try:
         metadata = load_rsna_metadata_safe(rsna_root)
+        use_smoke_checkpoint = st.sidebar.checkbox(
+            "Use experimental smoke-test checkpoint",
+            value=False,
+            key="rsna_use_smoke_checkpoint",
+            help=f"Loads {RSNA_SMOKE_CHECKPOINT_PATH.as_posix()} if it exists. Off by default.",
+        )
         available_studies = discover_available_studies(rsna_root, metadata)
 
         if not available_studies:
@@ -185,16 +196,20 @@ if volume is not None:
                 st.divider()
                 st.subheader("Quality Assessment Report")
 
+                active_checkpoint_path = RSNA_SMOKE_CHECKPOINT_PATH if use_smoke_checkpoint else RSNA_CHECKPOINT_PATH
                 model_predictions = None
-                if RSNA_CHECKPOINT_PATH.is_file():
+                if active_checkpoint_path.is_file():
                     try:
                         model_predictions = run_inference(
                             metadata=metadata,
-                            checkpoint_path=RSNA_CHECKPOINT_PATH,
+                            checkpoint_path=active_checkpoint_path,
                             study_uid=study_metadata["study_uid"],
                         )
                     except RSNAInferenceError as e:
                         st.warning(f"Model inference unavailable for this study: {e}")
+                elif use_smoke_checkpoint:
+                    st.info(f"Smoke-test checkpoint not found at `{RSNA_SMOKE_CHECKPOINT_PATH.as_posix()}`; "
+                            "model predictions are unavailable.")
 
                 try:
                     decision_report = generate_decision_report(
@@ -247,6 +262,8 @@ if volume is not None:
                     st.info(f"**Model Status:** {decision_report.model_status}")
 
                     if decision_report.model_predictions is not None:
+                        if use_smoke_checkpoint:
+                            st.warning(RSNA_SMOKE_WARNING)
                         st.caption("Model outputs are experimental probabilities and are not a clinical diagnosis.")
                         predictions_df = pd.DataFrame(
                             list(decision_report.model_predictions.items()),
