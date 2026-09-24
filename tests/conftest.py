@@ -18,6 +18,7 @@ def pytest_addoption(parser):
 def pytest_configure(config):
     config.addinivalue_line("markers", "mrnet: optional read-only local MRNet integration check")
     config.addinivalue_line("markers", "rsna_real: optional read-only check against the downloaded RSNA study")
+    config.addinivalue_line("markers", "rsna: read-only RSNA integration check; skips cleanly if local data is absent")
 
 
 def pytest_collection_modifyitems(config, items):
