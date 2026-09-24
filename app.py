@@ -23,6 +23,22 @@ RSNA_SMOKE_CHECKPOINT_PATH = Path("outputs/rsna-knee-smoke/checkpoint_smoke.pt")
 RSNA_SMOKE_WARNING = ("Experimental smoke-test model — trained on only 3 studies; "
                       "outputs are not clinically meaningful and are not a diagnosis.")
 
+IMAGE_PANEL_HEIGHT = 280  # display-only height (px) of each panel in the 2x2 image grid
+
+
+def fit_panel_height(image, height=IMAGE_PANEL_HEIGHT, nearest=False):
+    """Aspect-preserving copy scaled to `height` px for display only; the input array is never modified."""
+    rows, cols = image.shape[:2]
+    if rows == 0 or cols == 0:
+        return image
+    scale = height / rows
+    if nearest:
+        interpolation = cv2.INTER_NEAREST
+    else:
+        interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+    return cv2.resize(np.ascontiguousarray(image), (max(1, round(cols * scale)), height), interpolation=interpolation)
+
+
 st.set_page_config(page_title="MRI Vision Core", layout="wide")
 
 st.title("MRI Vision Core")
@@ -165,23 +181,30 @@ if volume is not None:
                 is_inverted=volume.is_inverted
             )
 
-            col1, col2 = st.columns(2)
-            with col1:
-                orig = results["original"]
-                st.subheader("Original")
-                st.image(orig, channels="BGR" if len(orig.shape) == 3 else "GRAY", use_container_width=True)
-            with col2:
-                st.subheader("Preprocessed")
-                st.image(results["preprocessed"], clamp=True, use_container_width=True)
+            # 2x2 grid of compact display copies (~IMAGE_PANEL_HEIGHT px tall); processing arrays stay untouched.
+            st.html("<style>.st-key-image_grid [data-testid='stVerticalBlock'] { gap: 0.4rem; }</style>")
+            with st.container(key="image_grid"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    orig = results["original"]
+                    panel = fit_panel_height(orig)
+                    st.markdown("##### Original")
+                    st.image(panel, channels="BGR" if len(orig.shape) == 3 else "GRAY", width=panel.shape[1])
+                with col2:
+                    panel = fit_panel_height(results["preprocessed"])
+                    st.markdown("##### Preprocessed")
+                    st.image(panel, clamp=True, width=panel.shape[1])
 
-            col3, col4 = st.columns(2)
-            with col3:
-                st.subheader("Segmentation Mask")
-                st.image(results["mask"], clamp=True, use_container_width=True)
-            with col4:
-                overlay_rgb = results["overlay"][..., ::-1] if len(results["overlay"].shape) == 3 else results["overlay"]
-                st.subheader("Overlay")
-                st.image(overlay_rgb, use_container_width=True)
+                col3, col4 = st.columns(2)
+                with col3:
+                    panel = fit_panel_height(results["mask"], nearest=True)
+                    st.markdown("##### Segmentation Mask")
+                    st.image(panel, clamp=True, width=panel.shape[1])
+                with col4:
+                    overlay_rgb = results["overlay"][..., ::-1] if len(results["overlay"].shape) == 3 else results["overlay"]
+                    panel = fit_panel_height(overlay_rgb)
+                    st.markdown("##### Overlay")
+                    st.image(panel, width=panel.shape[1])
 
             st.divider()
             st.subheader("Extracted Image Features")
