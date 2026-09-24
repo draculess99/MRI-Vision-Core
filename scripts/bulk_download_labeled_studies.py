@@ -25,13 +25,16 @@ Usage:
 import argparse
 import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from queue import Queue
@@ -55,6 +58,103 @@ CACHE_PAGE_SAFETY_LIMIT = 10000
 CACHE_SUCCESS_DELAY = 0.75
 KAGGLE_PAGE_SIZE = 200
 TRANSIENT_PAGE_RETRIES = 3
+CIRCUIT_BREAKER_THRESHOLD = 20
+MAX_FAILURE_EXAMPLES = 5
+ERROR_TEXT_LIMIT = 200
+
+CATEGORY_RATE_LIMIT = "HTTP 429 / too many requests"
+CATEGORY_AUTH = "HTTP 401 / authentication"
+CATEGORY_FORBIDDEN = "HTTP 403 / forbidden"
+CATEGORY_NOT_FOUND = "HTTP 404 / not found"
+CATEGORY_SERVER_ERROR = "HTTP 5xx"
+CATEGORY_TIMEOUT = "timeout"
+CATEGORY_CONNECTION = "connection / temporary error"
+CATEGORY_DICOM = "DICOM validation failure"
+CATEGORY_UNKNOWN = "unknown Kaggle CLI failure"
+TRANSIENT_CATEGORIES = frozenset(
+    {CATEGORY_RATE_LIMIT, CATEGORY_SERVER_ERROR, CATEGORY_TIMEOUT, CATEGORY_CONNECTION}
+)
+
+_SECRET_ENV_NAMES = ("KAGGLE_KEY", "KAGGLE_USERNAME", "KAGGLE_API_TOKEN")
+_SECRET_PATTERNS = (
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer <redacted>"),
+    (re.compile(r"(?i)([\"']?\b(?:api[_-]?key|key|username|access[_-]?token|refresh[_-]?token|token|password|secret|authorization)\b[\"']?)"
+                r"(\s*[:=]\s*)([\"']?)[^\s,\"'}]+"), r"\1\2\3<redacted>"),
+    # Opaque 32+ character runs (legacy 32-hex keys, KGAT_ tokens). Requiring a letter or underscore keeps
+    # all-digit UID segments (up to 38 digits) readable in file paths.
+    (re.compile(r"\b(?=[A-Za-z0-9_-]*[A-Za-z_])[A-Za-z0-9_-]{32,}\b"), "<redacted>"),
+)
+
+
+@dataclass(frozen=True)
+class DownloadFailure:
+    """A permanently failed file download, kept for the end-of-run failure report."""
+    file_path: str
+    message: str
+    category: str
+    attempts: int
+    returncode: int | None = None
+
+
+class CircuitBreaker:
+    """Trips after `threshold` consecutive permanent failures; any success resets the count."""
+
+    def __init__(self, threshold: int | None = None):
+        self.threshold = CIRCUIT_BREAKER_THRESHOLD if threshold is None else threshold
+        self.consecutive_failures = 0
+        self.tripped = False
+
+    def record(self, success: bool) -> bool:
+        if success:
+            self.consecutive_failures = 0
+        else:
+            self.consecutive_failures += 1
+            if self.consecutive_failures >= self.threshold:
+                self.tripped = True
+        return self.tripped
+
+
+def sanitize_error_text(text, limit: int = ERROR_TEXT_LIMIT) -> str:
+    """Collapse whitespace and redact credentials/home paths before truncating, so no secret is half-cut."""
+    text = " ".join(str(text or "").split())
+    for name in _SECRET_ENV_NAMES:
+        value = os.environ.get(name)
+        if value and len(value) >= 4:
+            text = text.replace(value, "<redacted>")
+    text = text.replace(str(Path.home()), "~")
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text[:limit]
+
+
+def _has_status(text: str, *codes: str) -> bool:
+    """True if an HTTP status code appears as its own token (not inside a UID, path, or larger number)."""
+    return re.search(r"(?<![\d./_-])(?:%s)(?![\d/_-]|\.\w)" % "|".join(codes), text) is not None
+
+
+def classify_error(message) -> str:
+    text = " ".join(str(message or "").split()).lower()
+    if _has_status(text, "429") or "too many requests" in text:
+        return CATEGORY_RATE_LIMIT
+    if _has_status(text, "401") or "unauthorized" in text or "authenticat" in text:
+        return CATEGORY_AUTH
+    if _has_status(text, "403") or "forbidden" in text:
+        return CATEGORY_FORBIDDEN
+    if _has_status(text, "404"):
+        return CATEGORY_NOT_FOUND
+    if _has_status(text, "500", "502", "503", "504"):
+        return CATEGORY_SERVER_ERROR
+    if "timeout" in text or "timed out" in text:
+        return CATEGORY_TIMEOUT
+    if "connection" in text or "temporarily" in text:
+        return CATEGORY_CONNECTION
+    if "not valid dicom" in text or "no .dcm file" in text:
+        return CATEGORY_DICOM
+    return CATEGORY_UNKNOWN
+
+
+def is_transient_error(message) -> bool:
+    return classify_error(message) in TRANSIENT_CATEGORIES
 
 
 def quarantine_incompatible_checkpoint(checkpoint_file: Path, reason: str):
@@ -576,8 +676,15 @@ def build_manifest(labeled_files: dict, data_dir: Path) -> dict:
     return manifest
 
 
-def download_file_with_retry(file_path: str, destination: Path) -> tuple[bool, str]:
-    """Download one DICOM file with retry logic."""
+def download_file_with_retry(file_path: str, destination: Path) -> tuple[bool, DownloadFailure | None]:
+    """Download one DICOM file with retry logic.
+
+    Returns (True, None) on success, or (False, DownloadFailure) once the file has failed permanently.
+    """
+
+    def failure(message, attempts, returncode=None):
+        message = sanitize_error_text(message)
+        return False, DownloadFailure(file_path, message, classify_error(message), attempts, returncode)
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -600,26 +707,22 @@ def download_file_with_retry(file_path: str, destination: Path) -> tuple[bool, s
                 )
 
                 if result.returncode != 0:
-                    error_msg = (result.stderr or result.stdout).strip()[:100]
+                    error_msg = sanitize_error_text(result.stderr or result.stdout)
 
-                    is_transient = any(x in error_msg.lower() for x in [
-                        "timeout", "connection", "temporarily", "429", "503", "502"
-                    ])
-
-                    if is_transient and attempt < MAX_RETRIES:
+                    if is_transient_error(error_msg) and attempt < MAX_RETRIES:
                         time.sleep(RETRY_BACKOFF[attempt - 1])
                         continue
                     else:
-                        return False, error_msg
+                        return failure(error_msg, attempt, result.returncode)
 
                 dcm_files = list(staging.rglob("*.dcm"))
                 if not dcm_files:
-                    return False, "No .dcm file in download"
+                    return failure("No .dcm file in download", attempt, result.returncode)
 
                 downloaded = dcm_files[0]
 
                 if not is_valid_dicom(downloaded):
-                    return False, "Downloaded file is not valid DICOM"
+                    return failure("Downloaded file is not valid DICOM", attempt, result.returncode)
 
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(downloaded), str(destination))
@@ -629,11 +732,11 @@ def download_file_with_retry(file_path: str, destination: Path) -> tuple[bool, s
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_BACKOFF[attempt - 1])
                 continue
-            return False, "Timeout after retries"
+            return failure("Timeout after retries", attempt)
         except Exception as e:
-            return False, str(e)[:100]
+            return failure(str(e), attempt)
 
-    return False, f"Failed after {MAX_RETRIES} attempts"
+    return failure(f"Failed after {MAX_RETRIES} attempts", MAX_RETRIES)
 
 
 def download_studies_concurrent(
@@ -641,24 +744,35 @@ def download_studies_concurrent(
     labeled_files: dict,
     output_root: Path,
     dry_run: bool = False,
-    max_workers: int = MAX_WORKERS
+    max_workers: int = MAX_WORKERS,
+    breaker: CircuitBreaker | None = None
 ) -> dict:
-    """Download multiple studies with concurrent file downloads."""
+    """Download multiple studies with concurrent file downloads.
+
+    One circuit breaker spans all studies: once it trips, the remaining studies are not started.
+    """
 
     results = {}
+    studies_not_started = []
+    breaker = breaker if breaker is not None else CircuitBreaker()
     start_time = time.time()
 
     for study_uid in studies_to_download:
+        if breaker.tripped:
+            studies_not_started.append(study_uid)
+            continue
         study_result = download_single_study(
             study_uid,
             labeled_files[study_uid],
             output_root,
             dry_run=dry_run,
-            max_workers=max_workers
+            max_workers=max_workers,
+            breaker=breaker
         )
         results[study_uid] = study_result
 
     elapsed = time.time() - start_time
+    failures = [failure for r in results.values() for failure in r['failures']]
 
     return {
         'studies': results,
@@ -667,7 +781,29 @@ def download_studies_concurrent(
         'total_skipped': sum(r['skipped'] for r in results.values()),
         'total_failed': sum(r['failed'] for r in results.values()),
         'total_size_mb': sum(r['size_mb'] for r in results.values()),
+        'total_not_attempted': sum(r['not_attempted'] for r in results.values()),
+        'studies_not_started': studies_not_started,
+        'circuit_breaker_tripped': breaker.tripped,
+        'circuit_breaker_threshold': breaker.threshold,
+        'failure_categories': Counter(failure.category for failure in failures),
+        'failure_examples': failures[:MAX_FAILURE_EXAMPLES],
     }
+
+
+def print_failure_report(result: dict):
+    """Print aggregated failure categories and a few sanitized examples (never one line per failure)."""
+    categories = result.get('failure_categories') or {}
+    if not categories:
+        return
+    print("\nFailure categories:")
+    for category, count in sorted(categories.items(), key=lambda item: (-item[1], item[0])):
+        print(f"  {category}: {count}")
+    examples = result.get('failure_examples') or []
+    print(f"\nExample failed files (first {len(examples)} of {sum(categories.values())}):")
+    for failure in examples:
+        returncode = "n/a" if failure.returncode is None else failure.returncode
+        print(f"  {failure.file_path} | returncode={returncode} | attempts={failure.attempts} | "
+              f"{failure.category}: {failure.message}")
 
 
 def download_single_study(
@@ -675,7 +811,8 @@ def download_single_study(
     series_files: dict,
     output_root: Path,
     dry_run: bool = False,
-    max_workers: int = MAX_WORKERS
+    max_workers: int = MAX_WORKERS,
+    breaker: CircuitBreaker | None = None
 ) -> dict:
     """Download all files for one study with concurrent downloads."""
 
@@ -685,8 +822,10 @@ def download_single_study(
         'downloaded': 0,
         'skipped': 0,
         'failed': 0,
+        'not_attempted': 0,
         'size_mb': 0.0,
         'errors': [],
+        'failures': [],
     }
 
     print(f"\nStudy {study_uid[-12:]}:")
@@ -733,6 +872,29 @@ def download_single_study(
 
     # Download with bounded concurrency
     if download_queue and ThreadPoolExecutor:
+        breaker = breaker if breaker is not None else CircuitBreaker()
+
+        def tally(future) -> bool:
+            file_path, dest = futures[future]
+            series_uid = dest.parent.name
+            try:
+                success, failure = future.result()
+                if success:
+                    stats['downloaded'] += 1
+                    stats['size_mb'] += dest.stat().st_size / (1024 * 1024)
+                else:
+                    stats['failed'] += 1
+                    stats['errors'].append(f"{series_uid[-12:]}: {failure.message}")
+                    stats['failures'].append(failure)
+            except Exception as e:
+                message = sanitize_error_text(e)
+                stats['failed'] += 1
+                stats['errors'].append(f"{series_uid[-12:]}: {message}")
+                stats['failures'].append(DownloadFailure(file_path, message, classify_error(message), 1))
+                success = False
+            return success
+
+        handled = set()
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(download_file_with_retry, file_path, dest): (file_path, dest)
@@ -740,20 +902,24 @@ def download_single_study(
             }
 
             for future in as_completed(futures):
-                file_path, dest = futures[future]
-                series_uid = dest.parent.name
+                handled.add(future)
+                if breaker.record(tally(future)):
+                    # Cancel only files that have not started; downloads already running finish normally
+                    # (staged write + validation + move), so no partial file is ever left behind.
+                    for pending in futures:
+                        pending.cancel()
+                    print(f"  Circuit breaker tripped: {breaker.consecutive_failures} consecutive permanent "
+                          f"failures. No new downloads will be started.")
+                    break
 
-                try:
-                    success, error = future.result()
-                    if success:
-                        stats['downloaded'] += 1
-                        stats['size_mb'] += dest.stat().st_size / (1024 * 1024)
-                    else:
-                        stats['failed'] += 1
-                        stats['errors'].append(f"{series_uid[-12:]}: {error}")
-                except Exception as e:
-                    stats['failed'] += 1
-                    stats['errors'].append(f"{series_uid[-12:]}: {str(e)[:100]}")
+        # The executor has now waited for in-flight downloads; account for them without feeding the breaker.
+        for future in futures:
+            if future in handled:
+                continue
+            if future.cancelled():
+                stats['not_attempted'] += 1
+            else:
+                tally(future)
 
     # Summarize per-series
     for series_uid in series_files.keys():
@@ -773,8 +939,9 @@ def download_single_study(
 
     # Print summary
     total_files = sum(len(files) for files in series_files.values())
+    not_attempted_note = f" [{stats['not_attempted']} not attempted]" if stats['not_attempted'] else ""
     print(f"  Files: {stats['downloaded']} downloaded + {stats['skipped']} existing "
-          f"({stats['size_mb']:.1f} MB) [{stats['failed']} failed]")
+          f"({stats['size_mb']:.1f} MB) [{stats['failed']} failed]{not_attempted_note}")
 
     return stats
 
@@ -851,9 +1018,18 @@ def main(argv=None):
         print(f"  Failed: {result['total_failed']}")
         print(f"  Size: {result['total_size_mb']:.1f} MB")
         print(f"  Time: {result['elapsed_seconds']:.1f}s")
+
+        print_failure_report(result)
+
+        if result['circuit_breaker_tripped']:
+            print(f"\nCircuit breaker triggered after {result['circuit_breaker_threshold']} "
+                  f"consecutive permanent download failures.")
+            print(f"  {result['total_not_attempted']} queued files and "
+                  f"{len(result['studies_not_started'])} studies were not attempted. "
+                  f"Valid files on disk are kept and skipped on rerun.")
         print("=" * 90)
 
-        return 0 if result['total_failed'] == 0 else 1
+        return 0 if result['total_failed'] == 0 and not result['circuit_breaker_tripped'] else 1
 
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
