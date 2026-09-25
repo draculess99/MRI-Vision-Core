@@ -14,6 +14,7 @@ from mri_core.rsna_integration import (
 )
 from mri_core.decision import generate_decision_report
 from mri_core.rsna_knee_inference import run_inference, RSNAInferenceError
+from mri_core.rsna_knee_ensemble import run_ensemble_inference
 
 # Checkpoint location matches configs/rsna_knee.json's "checkpoint_path". No checkpoint
 # is expected to exist yet; the RSNA viewer remains fully usable without one.
@@ -22,6 +23,13 @@ RSNA_CHECKPOINT_PATH = Path("outputs/rsna-knee/checkpoint_best.pt")
 RSNA_SMOKE_CHECKPOINT_PATH = Path("outputs/rsna-knee-smoke/checkpoint_smoke.pt")
 RSNA_SMOKE_WARNING = ("Experimental smoke-test model — trained on only 3 studies; "
                       "outputs are not clinically meaningful and are not a diagnosis.")
+# 5-fold ensemble checkpoints (all must exist for ensemble to run)
+RSNA_ENSEMBLE_CHECKPOINT_PATHS = [
+    Path(f"outputs/rsna-knee-ensemble/checkpoint_rsna_stratified_fold{i}.pt")
+    for i in range(1, 6)
+]
+RSNA_ENSEMBLE_WARNING = ("Experimental 5-fold ensemble — trained on a limited labeled dataset; "
+                         "outputs are not clinically validated and are not a diagnosis.")
 
 IMAGE_PANEL_HEIGHT = 280  # display-only height (px) of each panel in the 2x2 image grid
 
@@ -70,6 +78,7 @@ volume = None
 status_msg = ""
 decision_report = None
 study_metadata = {}
+use_ensemble_inference = False
 use_smoke_checkpoint = False
 
 if data_source == "Upload File":
@@ -90,6 +99,12 @@ if data_source == "Upload File":
 elif data_source == "Explore RSNA Studies":
     try:
         metadata = load_rsna_metadata_safe(rsna_root)
+        use_ensemble_inference = st.sidebar.checkbox(
+            "Use 5-fold ensemble predictions (experimental)",
+            value=False,
+            key="rsna_use_ensemble_inference",
+            help="Uses all 5 folds if available. Off by default.",
+        )
         use_smoke_checkpoint = st.sidebar.checkbox(
             "Use experimental smoke-test checkpoint",
             value=False,
@@ -219,20 +234,40 @@ if volume is not None:
                 st.divider()
                 st.subheader("Quality Assessment Report")
 
-                active_checkpoint_path = RSNA_SMOKE_CHECKPOINT_PATH if use_smoke_checkpoint else RSNA_CHECKPOINT_PATH
                 model_predictions = None
-                if active_checkpoint_path.is_file():
-                    try:
-                        model_predictions = run_inference(
-                            metadata=metadata,
-                            checkpoint_path=active_checkpoint_path,
-                            study_uid=study_metadata["study_uid"],
-                        )
-                    except RSNAInferenceError as e:
-                        st.warning(f"Model inference unavailable for this study: {e}")
-                elif use_smoke_checkpoint:
-                    st.info(f"Smoke-test checkpoint not found at `{RSNA_SMOKE_CHECKPOINT_PATH.as_posix()}`; "
-                            "model predictions are unavailable.")
+
+                # Inference logic: ensemble > smoke > production, in that priority order
+                if use_ensemble_inference:
+                    # Check if all 5 folds exist
+                    all_folds_exist = all(p.is_file() for p in RSNA_ENSEMBLE_CHECKPOINT_PATHS)
+                    if all_folds_exist:
+                        try:
+                            model_predictions = run_ensemble_inference(
+                                metadata=metadata,
+                                fold_checkpoint_paths=RSNA_ENSEMBLE_CHECKPOINT_PATHS,
+                                study_uid=study_metadata["study_uid"],
+                            )
+                        except RSNAInferenceError as e:
+                            st.warning(f"Ensemble inference unavailable for this study: {e}")
+                    else:
+                        missing_folds = [i for i, p in enumerate(RSNA_ENSEMBLE_CHECKPOINT_PATHS, start=1) if not p.is_file()]
+                        st.info(f"5-fold ensemble not available (missing folds: {', '.join(map(str, missing_folds))}); "
+                                "model predictions are unavailable.")
+                else:
+                    # Use existing smoke or production checkpoint
+                    active_checkpoint_path = RSNA_SMOKE_CHECKPOINT_PATH if use_smoke_checkpoint else RSNA_CHECKPOINT_PATH
+                    if active_checkpoint_path.is_file():
+                        try:
+                            model_predictions = run_inference(
+                                metadata=metadata,
+                                checkpoint_path=active_checkpoint_path,
+                                study_uid=study_metadata["study_uid"],
+                            )
+                        except RSNAInferenceError as e:
+                            st.warning(f"Model inference unavailable for this study: {e}")
+                    elif use_smoke_checkpoint:
+                        st.info(f"Smoke-test checkpoint not found at `{RSNA_SMOKE_CHECKPOINT_PATH.as_posix()}`; "
+                                "model predictions are unavailable.")
 
                 try:
                     decision_report = generate_decision_report(
@@ -285,7 +320,9 @@ if volume is not None:
                     st.info(f"**Model Status:** {decision_report.model_status}")
 
                     if decision_report.model_predictions is not None:
-                        if use_smoke_checkpoint:
+                        if use_ensemble_inference:
+                            st.warning(RSNA_ENSEMBLE_WARNING)
+                        elif use_smoke_checkpoint:
                             st.warning(RSNA_SMOKE_WARNING)
                         st.caption("Model outputs are experimental probabilities and are not a clinical diagnosis.")
                         predictions_df = pd.DataFrame(
