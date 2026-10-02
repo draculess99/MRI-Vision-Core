@@ -170,6 +170,38 @@ Quality Status is generated from deterministic image and processing checks (fore
 
 > Research and educational prototype. Not for medical diagnosis or clinical decision-making. The smoke checkpoint exists to validate the end-to-end software pipeline; its predictions are not a measure of clinical performance.
 
+## OpenCV Real MRI Demo
+
+The OpenCV/AWS hackathon pipeline runs against a real RSNA knee MRI DICOM and produces four visual artifacts that show each stage of the deterministic image-processing workflow.
+
+The pipeline is:
+
+**Real DICOM → OpenCV enhancement → edge detection → visual overlay**
+
+### Original MRI
+
+![Original MRI](docs/images/opencv_aws_demo/real_knee_mri_original.png)
+
+### Enhanced MRI
+
+![Enhanced MRI](docs/images/opencv_aws_demo/real_knee_mri_enhanced.png)
+
+### Detected Edges
+
+![MRI Edges](docs/images/opencv_aws_demo/real_knee_mri_edges.png)
+
+### Edge Overlay
+
+![MRI Overlay](docs/images/opencv_aws_demo/real_knee_mri_overlay.png)
+
+The demo script is located at:
+
+`hackathon/opencv_aws/demo_real_mri.py`
+
+It automatically locates a real RSNA knee MRI DICOM, loads the image, applies the OpenCV processing pipeline, and writes the generated artifacts to the local demo output directory.
+
+The selected evidence images above are stored separately under `docs/images/opencv_aws_demo/` so they can be tracked in Git while generated files under `outputs/` remain disposable.
+
 ## Setup and execution
 
 PowerShell, from the repository root:
