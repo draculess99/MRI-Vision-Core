@@ -35,3 +35,9 @@ data/rsna-knee/
 checkpoints/
 outputs/rsna-knee/
 submission.csv
+
+# Kaggle RSNA generated artifacts
+.claude/
+kaggle_checkpoints_tmp/
+kaggle_rsna_baseline_checkpoints*.zip
+mri_core_kaggle*.zip

@@ -1,0 +1,18 @@
+{
+    "image_size":  128,
+    "batch_size":  4,
+    "epochs":  1,
+    "learning_rate":  0.001,
+    "validation_fraction":  0.2,
+    "seed":  0,
+    "num_workers":  2,
+    "device":  "auto",
+    "checkpoint_path":  "outputs/rsna-knee-rehearsal/checkpoint_1epoch.pt",
+    "slices_per_series":  9,
+    "dropout":  0.2,
+    "planes":  [
+                   "Axial",
+                   "Coronal",
+                   "Sagittal"
+               ]
+}
