@@ -16,6 +16,7 @@ from .rsna_knee_dataset import (PLANE_NAMES, TARGET_COLUMNS, RSNAKneeMetadata,
                                 load_series_volume, select_series, split_labeled_studies)
 from .rsna_knee_model import RSNAKneeCNN
 
+from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 
 def seed_everything(seed: int):
     random.seed(seed)
@@ -88,9 +89,50 @@ def _macro_loss(losses):
     return float(np.mean(losses)) if losses else None
 
 
+def split_labeled_studies_cv(metadata: RSNAKneeMetadata, n_splits: int, fold: int, seed: int):
+    labeled = metadata.complete_label_train.reset_index(drop=True)
+
+    if len(labeled) < n_splits:
+        raise ValueError(f"Need at least {n_splits} labeled studies, found {len(labeled)}")
+
+    if not 0 <= fold < n_splits:
+        raise ValueError(f"fold must be between 0 and {n_splits - 1}")
+
+    labels = labeled[list(TARGET_COLUMNS)].to_numpy(dtype=np.float32)
+
+    splitter = MultilabelStratifiedKFold(
+        n_splits=n_splits,
+        shuffle=True,
+        random_state=seed,
+    )
+
+    for fold_index, (train_idx, valid_idx) in enumerate(splitter.split(labeled, labels)):
+        if fold_index == fold:
+            return (
+                labeled.iloc[train_idx].reset_index(drop=True),
+                labeled.iloc[valid_idx].reset_index(drop=True),
+            )
+
+    raise RuntimeError("Requested fold was not produced")
+
+
 def train_rsna(metadata: RSNAKneeMetadata, config: dict, checkpoint_path: Path):
     seed_everything(int(config["seed"]))
-    train_frame, valid_frame = split_labeled_studies(metadata, float(config["validation_fraction"]), int(config["seed"]))
+
+    if "cv_folds" in config:
+    	train_frame, valid_frame = split_labeled_studies_cv(
+        	metadata,
+        	int(config["cv_folds"]),
+        	int(config.get("cv_fold", 0)),
+        	int(config["seed"]),
+    	)
+    else:
+    	train_frame, valid_frame = split_labeled_studies(
+        	metadata,
+        	float(config["validation_fraction"]),
+        	int(config["seed"]),
+    	)
+
     if not metadata.dicom_split_dir("train").is_dir():
         raise FileNotFoundError("RSNA DICOM files are not available; inspect supports metadata-only operation, training requires images")
     device_name = config.get("device", "auto")
