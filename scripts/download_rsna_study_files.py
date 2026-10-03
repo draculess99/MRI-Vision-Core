@@ -18,7 +18,7 @@ from pathlib import Path
 
 COMPETITION = "rsna-knee-abnormality-detection"
 UID = r"[0-9]+(?:\.[0-9]+)*"
-FILE_PATTERN = re.compile(rf"^train_series/({UID})/({UID})/({UID}\.dcm)$")
+FILE_PATTERN = re.compile(rf"^(?:train_series|test_series)/({UID})/({UID})/({UID}\.dcm)$")
 TRANSIENT_MARKERS = ("remote end closed", "connection aborted", "connection reset", "timed out",
                      "timeout", "temporarily", "try again", "429", "500", "502", "503", "504")
 
