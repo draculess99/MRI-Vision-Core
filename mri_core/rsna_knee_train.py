@@ -16,7 +16,10 @@ from .rsna_knee_dataset import (PLANE_NAMES, TARGET_COLUMNS, RSNAKneeMetadata,
                                 load_series_volume, select_series, split_labeled_studies)
 from .rsna_knee_model import RSNAKneeCNN
 
-from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
+try:
+    from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
+except ImportError:
+    MultilabelStratifiedKFold = None
 
 def seed_everything(seed: int):
     random.seed(seed)
@@ -99,6 +102,11 @@ def split_labeled_studies_cv(metadata: RSNAKneeMetadata, n_splits: int, fold: in
         raise ValueError(f"fold must be between 0 and {n_splits - 1}")
 
     labels = labeled[list(TARGET_COLUMNS)].to_numpy(dtype=np.float32)
+
+    if MultilabelStratifiedKFold is None:
+        raise ImportError(
+            "iterative-stratification is required for training, but not for inference"
+        )
 
     splitter = MultilabelStratifiedKFold(
         n_splits=n_splits,
