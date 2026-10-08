@@ -91,7 +91,14 @@ class UrllibTransport:
     def __call__(self, messages: Messages, config: Optional[NebiusConfig] = None) -> str:
         cfg = config or self.config
         body = json.dumps(
-            {"model": cfg.model, "messages": messages, "temperature": 0, "max_tokens": 700}
+            {
+                "model": cfg.model,
+                "messages": messages,
+                "temperature": 0,
+                "max_tokens": 160,
+                "store": False,
+                "response_format": {"type": "json_object"},
+            }
         ).encode("utf-8")
         request = urllib.request.Request(
             cfg.base_url.rstrip("/") + "/chat/completions",
@@ -104,7 +111,10 @@ class UrllibTransport:
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        return payload["choices"][0]["message"]["content"]
+        content = payload["choices"][0]["message"]["content"]
+        if content is None:
+            raise ValueError("API returned null content")
+        return content
 
 
 @dataclass(frozen=True)
