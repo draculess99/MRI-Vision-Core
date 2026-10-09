@@ -9,12 +9,32 @@ import pytest
 
 
 def test_streamlit_app_imports_without_credentials():
-    """Verify the Streamlit app module can be imported without API credentials."""
+    """Verify the Streamlit app module can be imported without API credentials or environment variables."""
+    import sys
+    from pathlib import Path
+
+    # Test that the module can be imported even when run from repo root
+    # This verifies the path bootstrap works correctly
     try:
         import hackathon.nebius_nvidia.streamlit_app as app_module
         assert app_module is not None
+        # Verify the bootstrap is in place
+        assert "_repo_root" in dir(app_module) or "sys" in dir(app_module)
     except ImportError as e:
         pytest.fail(f"Failed to import streamlit_app: {e}")
+
+
+def test_streamlit_app_path_bootstrap():
+    """Verify the app includes path bootstrap for local launches."""
+    import inspect
+    import hackathon.nebius_nvidia.streamlit_app as app_module
+
+    source = inspect.getsource(app_module)
+
+    # Verify path bootstrap is present
+    assert "sys.path" in source, "Path bootstrap not found"
+    assert "_repo_root" in source, "Repository root derivation not found"
+    assert "Path(__file__)" in source, "Path derivation from __file__ not found"
 
 
 def test_app_title_exact_unicode():
@@ -139,6 +159,16 @@ def test_app_content_includes_required_elements():
     # Scenario references (via default_scenarios())
     assert "default_scenarios" in source
 
+    # Human-readable scenario labels
+    assert "Consistent baseline/current" in source
+    assert "Large-change review" in source
+    assert "Low-information uncertainty" in source
+    assert "Named-reviewer approval" in source
+
+    # Selector label
+    assert "Choose a synthetic workflow scenario" in source
+    assert "Select a scenario to view its non-diagnostic evidence dossier" in source
+
     # Approval safeguard
     assert "PENDING_HUMAN_APPROVAL" in source
     assert "human approval required" in source.lower()
@@ -153,6 +183,24 @@ def test_app_content_includes_required_elements():
     assert "deterministic workflow only" in source.lower()
 
 
+def test_app_scenario_ids_unchanged():
+    """Verify the original scenario IDs are still available to the app logic."""
+    from hackathon.nebius_nvidia.eval_harness import default_scenarios
+
+    scenarios = default_scenarios()
+    assert len(scenarios) == 4
+
+    # Original scenario IDs must be unchanged
+    assert scenarios[0].name == "consistent_baseline_current"
+    assert scenarios[1].name == "large_change_review"
+    assert scenarios[2].name == "low_information_uncertain"
+    assert scenarios[3].name == "reviewer_approval"
+
+    # The app can select by index
+    for i in range(4):
+        assert scenarios[i] is not None
+
+
 def test_readme_has_clean_utf8():
     """Verify the README contains no replacement characters and the command is present."""
     from pathlib import Path
@@ -165,3 +213,41 @@ def test_readme_has_clean_utf8():
 
     # Command is present
     assert "streamlit run hackathon/nebius_nvidia/streamlit_app.py" in content
+
+
+def test_scenario_selector_css_styling():
+    """Verify the scenario selector has strong CSS styling for visual prominence."""
+    import inspect
+    import hackathon.nebius_nvidia.streamlit_app as app_module
+
+    source = inspect.getsource(app_module)
+
+    # Verify selected field dimensions
+    assert "64px" in source, "Selected field height/min-height (64px) not found"
+    assert "1.2rem" in source, "Selected text font-size (1.2rem) not found"
+
+    # Verify selected text weight
+    assert "font-weight: 600" in source, "Selected text font-weight (600) not found"
+
+    # Verify dropdown arrow/button size
+    assert "1.5rem" in source, "Dropdown arrow/button size (1.5rem) not found"
+
+    # Verify menu option dimensions
+    assert "52px" in source, "Menu option min-height (52px) not found"
+    assert "1.15rem" in source, "Menu option font-size (1.15rem) not found"
+
+    # Verify styling approach targets the actual react-aria-components markup
+    assert "!important" in source, "CSS !important declarations not found"
+    assert "stSelectbox" in source, "Streamlit selectbox selector not found"
+    assert 'role="group"' in source, "react-aria group container selector not found"
+    assert 'role="combobox"' in source, "Combobox input selector not found"
+    assert "box-sizing: border-box" in source, "Box-sizing property not found"
+
+    # Verify menu selector
+    assert 'role="listbox"' in source, "Listbox menu selector not found"
+    assert 'role="option"' in source, "Option selector not found"
+
+    # Verify colors and effects are retained
+    assert "#00d4ff" in source, "Sky-blue border color not found"
+    assert "#00e6ff" in source, "Hover/focus bright blue not found"
+    assert "border-radius" in source, "Rounded corners not found"

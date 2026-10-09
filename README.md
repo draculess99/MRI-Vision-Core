@@ -56,51 +56,12 @@ streamlit run app.py
 
 Research and educational prototype. Not for medical diagnosis or clinical decision-making.
 
-## Nebius × NVIDIA MRI Evidence Dossier (Hackathon)
+## Nebius × NVIDIA MRI Evidence Dossier
 
-A deterministic, non-diagnostic workflow layer for structured evidence review built on the core MRI processing pipeline. Integrates with Nebius Token Factory (NVIDIA Nemotron LLM) for brief generation.
+A deterministic, non-diagnostic synthetic workflow demonstration built on MRI Vision Core and ChangeGuard. It demonstrates evidence capture, explicit uncertainty handling, measured change review, and a named human-approval transition. The optional Nebius/Nemotron path is strictly validated and has a deterministic fallback.
 
-### Deterministic Synthetic Validation
-Four curated scenarios validate the workflow:
-1. **Consistent baseline/current** — Identical images, `CONSISTENT` status
-2. **Large-change review** — Significant feature deltas, `REVIEW` status  
-3. **Low-information uncertainty** — Quality flags (low contrast, full foreground), `UNCERTAIN` status
-4. **Named-reviewer approval** — Approval transition with safeguard retention
-
-**Human approval is required and cannot be bypassed.** Every dossier starts `PENDING_HUMAN_APPROVAL` and remains so unless a named human reviewer explicitly decides it.
-
-### Integration & Safeguards
-- **Nebius Token Factory:** Smoke test successfully reached `NVIDIA/NVIDIA-Nemotron-3-Nano-30B-A3B` with HTTP 200.
-- **Deterministic fallback:** If the LLM response fails, times out, or returns null content, the module gracefully falls back to a brief derived only from existing evidence fields. The approval safeguard is preserved.
-- **Strict validation:** Model responses are validated for exact schema, forbidden medical wording (diagnosis, treatment, lesion, etc.), and proof against approval field injection.
-
-### Metrics & Disclaimer
-**Synthetic workflow-validation metrics only; not clinical accuracy or medical performance.**
-- Scenarios evaluated: 4
-- Expected-status agreement: 100%
-- Evidence-field completeness: 100%
-- Human-approval gate enforcement: 100%
-- Observed mean synthetic dossier-build latency: 13.7–20.1 ms across local deterministic demo runs
-
-### Evidence & Validation
-
-![Nebius Token Factory live connectivity smoke test with NVIDIA Nemotron-3-Nano-30B-A3B](docs/images/nebius-nvidia/nebius-nvidia-live-connectivity-smoke-test.png)
-*Live Nebius Token Factory connectivity smoke test: HTTP 200 response from NVIDIA/NVIDIA-Nemotron-3-Nano-30B-A3B.*
-
-![MRI Evidence Dossier deterministic demo workflow metrics](docs/images/nebius-nvidia/nebius-nvidia-mri-evidence-dossier-demo-metrics.png)
-*Deterministic demo: four synthetic scenarios with 100% status agreement, 100% field completeness, and 100% human-approval gate enforcement.*
-
-### Run Focused Tests & Demo
-```cmd
-pytest -q tests/test_nebius_seed.py tests/test_nebius_dossier.py tests/test_nebius_eval_harness.py tests/test_nebius_demo.py tests/test_nebius_nemotron_review.py
-```
-
-Run the deterministic demo:
-```cmd
-python -m hackathon.nebius_nvidia.demo
-```
-
-**Important:** The Nebius integration is a non-diagnostic evidence layer. It makes no medical determinations and cannot replace clinical judgment. A qualified human reviewer must evaluate source images and decide.
+For the full walkthrough, screenshots, focused tests, metrics, and local run commands, see:
+[Hackathon Nebius NVIDIA README](hackathon/nebius_nvidia/README.md)
 
 ## Limitations
 - Version 0.1 only supports simple image formats (PNG/JPG).

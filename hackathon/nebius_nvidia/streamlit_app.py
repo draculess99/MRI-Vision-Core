@@ -4,6 +4,14 @@ Synthetic workflow validation only. Non-diagnostic. No credentials required.
 Run: streamlit run hackathon/nebius_nvidia/streamlit_app.py
 """
 
+import sys
+from pathlib import Path
+
+# Bootstrap repository root into sys.path for local launches
+_repo_root = Path(__file__).parent.parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
 import streamlit as st
 
 from hackathon.nebius_nvidia.eval_harness import (
@@ -16,6 +24,69 @@ from hackathon.nebius_nvidia.evidence_dossier import build_dossier_from_images
 APP_TITLE = "MRI Evidence Dossier — Nebius × NVIDIA"
 
 st.set_page_config(page_title="MRI Evidence Dossier", layout="wide")
+
+# Scoped CSS for large, visually prominent scenario selector
+st.markdown(
+    """
+    <style>
+    /* Visible bordered box: Streamlit renders this with react-aria-components as
+       a div[role="group"] wrapping the input and open-button (no BaseWeb markup). */
+    div[data-testid="stSelectbox"] [role="group"] {
+        min-height: 64px !important;
+        height: 64px !important;
+        box-sizing: border-box !important;
+        display: flex !important;
+        align-items: center !important;
+        background-color: #1a2332 !important;
+        border: 2px solid #00d4ff !important;
+        border-radius: 8px !important;
+        padding: 0 14px !important;
+    }
+
+    div[data-testid="stSelectbox"] [role="group"]:focus-within {
+        border-color: #00e6ff !important;
+        box-shadow: 0 0 8px rgba(0, 212, 255, 0.3) !important;
+    }
+
+    /* Selected text input */
+    div[data-testid="stSelectbox"] input[role="combobox"] {
+        font-size: 1.2rem !important;
+        font-weight: 600 !important;
+        height: 100% !important;
+        background: transparent !important;
+    }
+
+    /* Open/close button (dropdown arrow) */
+    div[data-testid="stSelectbox"] [role="group"] button {
+        width: 1.5rem !important;
+        height: 1.5rem !important;
+        flex-shrink: 0 !important;
+    }
+
+    div[data-testid="stSelectbox"] [role="group"] button svg {
+        width: 1.5rem !important;
+        height: 1.5rem !important;
+    }
+
+    /* Widget label */
+    div[data-testid="stSelectbox"] label p {
+        font-size: 1.05rem !important;
+        font-weight: 700 !important;
+    }
+
+    /* Opened dropdown menu options (portaled listbox) */
+    [role="listbox"] [role="option"] {
+        min-height: 52px !important;
+        padding: 14px 16px !important;
+        font-size: 1.15rem !important;
+        display: flex !important;
+        align-items: center !important;
+        box-sizing: border-box !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.title(APP_TITLE)
 
@@ -43,10 +114,20 @@ with tab_scenarios:
     )
 
     scenarios = default_scenarios()
+
+    # Human-readable scenario labels
+    scenario_labels = {
+        0: "1. Consistent baseline/current",
+        1: "2. Large-change review",
+        2: "3. Low-information uncertainty",
+        3: "4. Named-reviewer approval",
+    }
+
+    st.markdown("Select a scenario to view its non-diagnostic evidence dossier.")
     selected_idx = st.selectbox(
-        "Select Scenario:",
+        "Choose a synthetic workflow scenario",
         range(len(scenarios)),
-        format_func=lambda i: f"{i+1}. {scenarios[i].name}",
+        format_func=lambda i: scenario_labels.get(i, f"{i+1}. {scenarios[i].name}"),
     )
 
     sc = scenarios[selected_idx]
