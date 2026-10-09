@@ -23,3 +23,18 @@ This system reuses the deterministic **MRI Core** and **ChangeGuard** evidence l
 - Non-diagnostic: Designed to support, not replace, human clinical judgment
 - Transparent: Each step documented and verifiable
 - Safe: Human approval gate ensures clinical oversight
+
+## Try the Interactive Demo
+
+Run the deterministic Streamlit demo locally (no credentials required):
+
+```bash
+streamlit run hackathon/nebius_nvidia/streamlit_app.py
+```
+
+The demo shows:
+- Four synthetic scenarios demonstrating the workflow
+- Evidence facts, status, and review notes for each scenario
+- The named-reviewer approval transition (PENDING → APPROVED)
+- Synthetic workflow-validation metrics
+- Information about the Nebius Token Factory integration
