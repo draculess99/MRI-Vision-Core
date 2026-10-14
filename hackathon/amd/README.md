@@ -14,9 +14,10 @@ OpenCV/Nebius branches are untouched. Based on `integration/mri-core-shared` @ `
 |---|---|
 | `python -m hackathon.amd.rocm_env [--require-amd] [--smi]` | Reports torch/ROCm build, visible devices, `rocm-smi`/`amd-smi`. `amd_gpu_available` is true only for a ROCm (HIP) torch build with a visible device; a CUDA or CPU-only build reports `false` with reasons. |
 | `python -m hackathon.amd.run_inference --data-root D --checkpoint C.pt [--study-uid U] [--device cuda]` | One real study through the shared engine. Writes `outputs/amd/prediction.json`. Fails (exit 1) rather than inventing output if the checkpoint or study is missing. |
-| `python -m hackathon.amd.benchmark --data-root D --checkpoint C.pt [--iterations 50 --warmup 5 --batch-sizes 1 4]` | CPU baseline vs AMD GPU on the identical checkpoint, preprocessed tensors, and config. Writes `outputs/amd/benchmark.json`. |
+| `python -m hackathon.amd.benchmark --data-root D --checkpoint C.pt [--iterations 50 --warmup 5 --batch-sizes 1 4]` | CPU baseline vs AMD GPU, native `RSNAKneeCNN` path, on the identical checkpoint, preprocessed tensors, and config. Writes `outputs/amd/benchmark.json`. |
+| `python -m hackathon.amd.benchmark_kaggle_bridge --data-root D --checkpoint fold0-knee-mil-best.ckpt [--iterations 50 --warmup 5 --batch-sizes 1 4]` | Same CPU-vs-AMD-GPU measurement, for the bridged Kaggle attention-MIL checkpoint (see "Bridged real-checkpoint smoke test" below). Writes `outputs/amd/benchmark_kaggle_bridge.json`. Does not modify or import model logic from `benchmark.py`; only its generic, model-agnostic timing/memory helpers are reused. |
 
-Add `--dicom-root` if DICOMs are not under `<data-root>/raw`.
+Add `--dicom-root` if DICOMs are not under `<data-root>/raw` (native path only; the bridged path always reads `<data-root>/raw/train_series/...`).
 
 ## Output separation (`prediction.json`)
 
@@ -101,6 +102,34 @@ Tests: `tests/test_amd_kaggle_bridge.py`, gated by `AMD_KAGGLE_CHECKPOINT` and
 `AMD_KAGGLE_RSNA_ROOT` (skips cleanly without them, same convention as `AMD_CHECKPOINT`/
 `AMD_RSNA_ROOT` above).
 
+## Bridged benchmark (`benchmark_kaggle_bridge.py`)
+
+Same CPU-vs-AMD-GPU measurement as `benchmark.py`, applied to the bridged checkpoint above
+instead of `RSNAKneeCNN`. A separate module so the native path's tests and behavior cannot
+regress; it reuses only `benchmark.py`'s generic, model-agnostic timing/memory helpers
+(`_sync`, `_summary`, `_process_rss_bytes`), never its model-loading code.
+
+```bash
+python -m hackathon.amd.benchmark_kaggle_bridge \
+  --data-root <real RSNA knee data_root with raw/train_series/...> \
+  --checkpoint <foldN-knee-mil-best.ckpt> \
+  --iterations 50 --warmup 5 --batch-sizes 1 4 \
+  --output outputs/amd/benchmark_kaggle_bridge.json
+```
+
+Same fairness rules as `benchmark.py` (one-time preprocessing, fresh model per device, discarded
+warm-up, `torch.cuda.synchronize()`-bracketed GPU timing, `psutil`-based CPU RSS when installed).
+`gpu.is_amd_rocm` always reflects the real environment check (`rocm_env.check_environment()`),
+never the device string passed in -- a CUDA/MPS accelerator run with `--allow-non-amd` is still
+labeled `is_amd_rocm: false`, and a CPU-only machine's `gpu` block is `{"status": "unavailable",
+"reasons": [...]}` with no numbers at all, never a fabricated GPU result. `workload` includes the
+checkpoint's SHA-256 and the bridged architecture string for provenance.
+
+Tests: `tests/test_amd_benchmark_kaggle_bridge.py` -- always runs (synthetic DICOM fixture +
+untrained-but-correctly-shaped Lightning checkpoint, same convention as `test_amd_adapter.py`'s
+synthetic tests), including two fully mocked tests of the GPU-available code path (`is_amd_rocm`
+true/false wiring) that need no real accelerator.
+
 ## Status
 
 - Native-architecture path (`run_inference.py`, `benchmark.py`): the trained fold checkpoints
@@ -109,5 +138,11 @@ Tests: `tests/test_amd_kaggle_bridge.py`, gated by `AMD_KAGGLE_CHECKPOINT` and
 - Bridged path (`kaggle_mil_bridge.py`, above): a real end-to-end run against a real DICOM study
   and a real externally-trained checkpoint has been produced and is reproducible bit-for-bit
   across runs (see commit for the exact command and output).
+- Bridged benchmark (`benchmark_kaggle_bridge.py`, above): a real CPU-only run against the same
+  real DICOM study and checkpoint has been produced (batch sizes 1 and 4; `outputs/amd/
+  benchmark_kaggle_bridge.json`). `gpu.status` correctly reports `unavailable` on this machine.
 - No AMD GPU has been available in this environment; `rocm_env.py` has only ever reported
-  `amd_gpu_available: false` with reasons. No AMD GPU benchmark has been produced.
+  `amd_gpu_available: false` with reasons. No AMD GPU benchmark (native or bridged) has been
+  produced. This is the only remaining requirement for a genuine AMD-hosted demo: an actual ROCm
+  environment to run the two commands above (`benchmark.py` once a native checkpoint exists,
+  `benchmark_kaggle_bridge.py` today) unchanged.
