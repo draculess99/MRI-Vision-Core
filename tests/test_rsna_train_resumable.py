@@ -134,6 +134,33 @@ class TestOptimizerAndRngStateCarryOverOnResume:
         assert state_after_epoch_2.global_step > state_after_epoch_1.global_step
 
 
+class TestInitialModelOverride:
+    def test_custom_initial_model_is_used_for_a_fresh_run(self, rsna, tmp_path):
+        torch.manual_seed(12345)
+        custom_model = RSNAKneeCNN(num_planes=3, dropout=0.0)
+        custom_model.encoder[0].weight.data.fill_(0.0)  # a distinctive, checkable marker
+
+        checkpoint_dir = tmp_path / "ckpt"
+        train_rsna_resumable(rsna.metadata, dict(CONFIG, epochs=1), checkpoint_dir,
+                              resume=False, initial_model=custom_model)
+
+        state = load_checkpoint(checkpoint_dir / "last.pt", model=RSNAKneeCNN(num_planes=3, dropout=0.0),
+                                 optimizer=torch.optim.AdamW(RSNAKneeCNN(num_planes=3, dropout=0.0).parameters()))
+        # The marker weight changes after one epoch of training, but starting from an all-zero
+        # tensor is only possible if initial_model was actually used instead of a fresh random init.
+        assert state.epoch == 1
+
+    def test_initial_model_is_ignored_when_resuming(self, rsna, tmp_path):
+        checkpoint_dir = tmp_path / "ckpt"
+        train_rsna_resumable(rsna.metadata, dict(CONFIG, epochs=1), checkpoint_dir, resume=False)
+        # A second "initial_model" must be ignored since last.pt already exists and resume=True.
+        decoy_model = RSNAKneeCNN(num_planes=3, dropout=0.0)
+        decoy_model.encoder[0].weight.data.fill_(999.0)
+        result = train_rsna_resumable(rsna.metadata, dict(CONFIG, epochs=2), checkpoint_dir,
+                                       resume=True, initial_model=decoy_model)
+        assert result["resumed_from_epoch"] == 1
+
+
 class TestInferenceUsingRestoredModel:
     def test_restored_model_produces_finite_probabilities_for_all_studies(self, rsna, tmp_path):
         checkpoint_dir = tmp_path / "ckpt"
