@@ -35,3 +35,12 @@ data/rsna-knee/
 checkpoints/
 outputs/rsna-knee/
 submission.csv
+
+# Local Claude Code session configuration -- never intended for distribution.
+.claude/
+
+# Temporary/local-only checkpoint staging and Kaggle notebook source/weight archives --
+# these were previously untracked only by convention (no git add . was ever run); this
+# closes that gap explicitly rather than relying on procedural discipline alone.
+kaggle_checkpoints_tmp/
+*.zip
