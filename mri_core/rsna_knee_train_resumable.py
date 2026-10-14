@@ -55,11 +55,17 @@ def train_rsna_resumable(
     scheduler_factory=None,
     scaler=None,
     device: Optional[str] = None,
+    initial_model=None,
 ):
     """Train RSNAKneeCNN with a fully resumable checkpoint written after every epoch.
 
     scheduler_factory, if given, is called as scheduler_factory(optimizer) once at the
     start of a fresh run (not on resume, where the scheduler's own state is restored).
+
+    initial_model, if given, is used instead of a freshly-constructed RSNAKneeCNN for a
+    *fresh* run (e.g. a model produced by rsna_mrnet_transfer.transfer_mrnet_encoder_to_rsna).
+    Ignored when resuming from an existing checkpoint, since the checkpoint's own weights
+    take precedence -- this only controls how a brand-new run's weights start out.
     """
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_path = checkpoint_dir / LAST_CHECKPOINT_NAME
@@ -89,7 +95,8 @@ def train_rsna_resumable(
         num_workers=int(config["num_workers"]),
     )
 
-    model = RSNAKneeCNN(len(config.get("planes", PLANE_NAMES)), float(config["dropout"])).to(torch_device)
+    model = (initial_model if initial_model is not None
+              else RSNAKneeCNN(len(config.get("planes", PLANE_NAMES)), float(config["dropout"]))).to(torch_device)
     labels = train_frame[list(TARGET_COLUMNS)].to_numpy(dtype=np.float32)
     positive = labels.sum(axis=0)
     pos_weight = torch.tensor(
