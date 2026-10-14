@@ -1,0 +1,9 @@
+# Optional voice dependencies (core demo and all tests work without them).
+# Offline speech-to-text:
+faster-whisper
+# PyAV 19 removed av.open(metadata_errors=...), which faster-whisper 1.2.x still passes.
+av>=11,<19
+# Cloud speech-to-text (only used when explicitly selected + ASSEMBLYAI_API_KEY set):
+assemblyai
+# Amazon Polly (only used when explicitly enabled in the UI):
+boto3

@@ -82,7 +82,7 @@ st.warning(
     """
     **This is a deterministic, non-diagnostic synthetic workflow demonstration.**
     Not for medical diagnosis or clinical use. All results shown are from offline,
-    deterministic demonstration scenarios with no external inference or API calls.
+    deterministic demonstration scenarios with no external inference. Voice features run locally by default; cloud speech is opt-in.
     """
 )
 
@@ -193,6 +193,11 @@ if st.button("Request Approval", type="primary"):
         except ValueError as e:
             st.error(f"Error: {e}")
 
+# Voice assistant (push-to-talk, local by default)
+from hackathon.amazon_alexa.voice_ui import render_voice_assistant
+
+render_voice_assistant(evidence.case_id, reviewer, comment)
+
 # Safety note
 st.markdown("---")
 st.markdown(
@@ -205,8 +210,8 @@ st.markdown(
     as non-diagnostic and require human review.
 
     ### Deterministic & Local
-    - No network calls
-    - No LLM inference
+    - Evidence logic makes no network calls and uses no LLM
+    - Voice is local by default (AssemblyAI / Amazon Polly are opt-in)
     - No credentials or API keys required
     - All logic is deterministic and reproducible
 

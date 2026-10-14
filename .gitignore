@@ -16,3 +16,14 @@ datasets/
 models/*.pt
 models/*.pth
 models/*.onnx
+
+# Secrets, credentials and caches
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+credentials
+credentials.*
+.pytest_cache/
+.streamlit/secrets.toml
