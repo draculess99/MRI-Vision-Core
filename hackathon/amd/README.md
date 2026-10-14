@@ -69,8 +69,45 @@ Default tests use the shared synthetic checkpoint/DICOM fixtures to check plumbi
 structure only; their numbers are not real predictions or benchmarks. To run against real assets:
 `AMD_CHECKPOINT=<last.pt> AMD_RSNA_ROOT=<data/rsna-knee> pytest tests/test_amd_adapter.py`.
 
+## Bridged real-checkpoint smoke test (`kaggle_mil_bridge.py`)
+
+No checkpoint compatible with `mri_core.rsna_knee_model.RSNAKneeCNN` exists on disk in this
+project. The only real *trained* RSNA knee weights found locally are five
+`foldN-knee-mil-best.ckpt` files from an external Kaggle notebook (`kneeabdet-baseline-v1`) --
+a PyTorch Lightning checkpoint for a `timm efficientnet_b0` backbone with gated attention-MIL
+pooling over DICOM slices, not the native MRNet-style encoder. `hackathon/amd/kaggle_mil_bridge.py`
+is a minimal, inference-only port of that architecture and its exact preprocessing (24 slices,
+224x224, 1st/99th percentile normalization, single-channel ImageNet mean/std) so those real
+weights can be run on a real local study. It does not modify `mri_core`'s own model or checkpoint
+code, and `run_inference.py` is untouched and still only talks to the native architecture.
+
+Needs `timm` and `pydicom` in addition to `requirements-rsna.txt` (`pip install timm pydicom`).
+
+```bash
+python -m hackathon.amd.run_real_checkpoint_smoke \
+  --data-root <real RSNA knee data_root with raw/train_series/...> \
+  --checkpoint <foldN-knee-mil-best.ckpt> \
+  --out outputs/amd/real_checkpoint_prediction.json
+```
+
+Output (`real_checkpoint_prediction.json`) has three sections: `prediction` (study/series UID,
+plane, 12 sigmoid probabilities, latency), `provenance` (checkpoint path + SHA-256, bridged
+architecture description, Lightning epoch/step), and `non_diagnostic_notice`. The probabilities
+are real forward-pass outputs of real trained weights on a real DICOM series -- not fabricated --
+but this checkpoint has never been evaluated or calibrated by this project, so they carry no
+accuracy claim.
+
+Tests: `tests/test_amd_kaggle_bridge.py`, gated by `AMD_KAGGLE_CHECKPOINT` and
+`AMD_KAGGLE_RSNA_ROOT` (skips cleanly without them, same convention as `AMD_CHECKPOINT`/
+`AMD_RSNA_ROOT` above).
+
 ## Status
 
-See the branch hand-off notes: the trained fold checkpoints (`outputs/rsna-fivefold-benchmark/...`)
-are gitignored and must be supplied; no real-checkpoint prediction or AMD GPU benchmark has been
-produced yet.
+- Native-architecture path (`run_inference.py`, `benchmark.py`): the trained fold checkpoints
+  (`outputs/rsna-fivefold-benchmark/...`) for `RSNAKneeCNN` are gitignored and were not found
+  anywhere on this machine; no real-checkpoint prediction through this path has been produced.
+- Bridged path (`kaggle_mil_bridge.py`, above): a real end-to-end run against a real DICOM study
+  and a real externally-trained checkpoint has been produced and is reproducible bit-for-bit
+  across runs (see commit for the exact command and output).
+- No AMD GPU has been available in this environment; `rocm_env.py` has only ever reported
+  `amd_gpu_available: false` with reasons. No AMD GPU benchmark has been produced.
