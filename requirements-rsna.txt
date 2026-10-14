@@ -1,3 +1,4 @@
 # RSNA metadata adapter and optional DICOM training path.
 -r requirements-cnn.txt
 pandas>=2.0,<3
+iterative-stratification>=0.1.7,<0.2
