@@ -99,8 +99,26 @@ def run_synthetic_smoke(work_dir: Path, *, arms: Sequence[str] = ARMS, device: s
         checks["losses_finite"] = all(np.isfinite([h["train_loss"], h["val_loss"]]).all() for h in result["history"])
         checks["scaler_state_restored"] = (not result["device"].startswith("cuda") or not amp) or bool(final["scaler"])
         checks["durable_export_matches"] = _sha(durable / "last.pt") == _sha(out / "last.pt")
+        # Recovery semantics: checkpoints exist only at epoch boundaries, so an interruption inside epoch 2 resumes at the
+        # start of epoch 2 (the partial epoch is redone). Compare against a run that was never interrupted.
+        reference = train_weak_label(train, val, config, work_dir / f"ref{arm}", fingerprint="smoke",
+                                     train_ids=train.ids, val_ids=val.ids)
+        ref_state = torch.load(work_dir / f"ref{arm}" / "last.pt", map_location="cpu", weights_only=True)
+        diffs = [float((final["model"][k].float() - ref_state["model"][k].float()).abs().max()) for k in final["model"]]
+        entry["recovery"] = {
+            "interrupted_in_epoch": 2, "interrupted_at_global_step": steps_per_epoch + 1,
+            "restored_epoch": saved["epoch"], "restored_global_step": saved["global_step"],
+            "recovery_granularity": "epoch boundary (mid-epoch recovery is not supported; the partial epoch is repeated)",
+            "resumed_final_step_equals_uninterrupted": final["global_step"] == ref_state["global_step"],
+            "weights_bitwise_equal_to_uninterrupted": all(d == 0.0 for d in diffs),
+            "max_abs_weight_diff_vs_uninterrupted": max(diffs),
+            "note": "bitwise equality is guaranteed on CPU and not on CUDA (non-deterministic kernels, AMP); the diff is informational on GPU"}
+        checks["resume_matches_uninterrupted_on_cpu"] = result["device"] != "cpu" or entry["recovery"]["weights_bitwise_equal_to_uninterrupted"]
+        checks["checkpoint_portable_to_cpu"] = all(v.device.type == "cpu" for v in final["model"].values())
         runtime = summarize_runtime(out)
         seconds = time.perf_counter() - started
+        entry["amp_detail"] = {"enabled": amp, "autocast_dtype": ("float16" if result["device"].startswith("cuda") else "not used on CPU")
+                               if amp else "off", "final_scaler_scale": (final["scaler"] or {}).get("scale") if final.get("scaler") else None}
         entry.update({
             "params_million": round(sum(p.numel() for p in build_model(arm, config).parameters()) / 1e6, 2),
             "device": result["device"], "amp": amp, "total_seconds": round(seconds, 2),
