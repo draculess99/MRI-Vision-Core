@@ -120,6 +120,7 @@ class WeakLabelDicomDataset(RSNAKneeDicomDataset):
         self.masks = np.asarray(masks, dtype=np.float32)
         self.on_error = on_error
         self.cache_dir = None if cache_dir is None else Path(cache_dir)
+        self.cache_hits = self.cache_misses = 0  # counted in the process that reads (not aggregated across DataLoader workers)
         self._shape_key = f"{config['image_size']}-{config['slices_per_series']}-{','.join(config.get('planes', PLANE_NAMES))}"
 
     def _cache_path(self, uid: str) -> Optional[Path]:
@@ -147,10 +148,12 @@ class WeakLabelDicomDataset(RSNAKneeDicomDataset):
                 blob = torch.load(path, map_location="cpu", weights_only=True)
                 images, mask = blob["images"].float(), blob["mask"]
                 if blob.get("meta") == self._cache_meta(uid) and self._valid_cache_entry(images, mask):
+                    self.cache_hits += 1
                     return {"images": images, "mask": mask, "study_uid": uid}
             except Exception:
                 pass  # unreadable or stale entry: fall through, re-decode and atomically rewrite it
         sample = super().__getitem__(index)
+        self.cache_misses += 1
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             temp = path.with_suffix(f".{os.getpid()}.tmp")  # per-process name; rename is atomic

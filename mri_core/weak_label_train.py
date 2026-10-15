@@ -42,10 +42,25 @@ IDENTITY_KEYS = ("arm", "seed", "learning_rate", "weight_decay", "batch_size", "
                  "planes", "dropout", "val_fraction", "reliability_weights", "max_pos_weight", "warmup_epochs", "amp")
 DEFAULT_CONFIG = {
     "arm": "A", "seed": 0, "epochs": 15, "batch_size": 8, "learning_rate": 1e-3, "weight_decay": 1e-4,
-    "warmup_epochs": 1, "grad_clip": 1.0, "dropout": 0.2, "image_size": 128, "slices_per_series": 9,
+    "warmup_epochs": 1, "grad_clip": 1.0, "early_stopping_patience": 0, "early_stopping_min_delta": 0.002, "dropout": 0.2, "image_size": 128, "slices_per_series": 9,
     "planes": ["Axial", "Coronal", "Sagittal"], "num_workers": 2, "val_fraction": 0.1, "max_pos_weight": 10.0,
     "reliability_weights": {}, "amp": False, "device": "auto", "max_invalid_fraction": 0.05, "deterministic": True,
 }
+
+
+def early_stop_due(history: Sequence[dict], patience: int, min_delta: float) -> bool:
+    """True when the last `patience` epochs failed to beat the best weak-validation loss by more than `min_delta`.
+
+    Derived purely from the recorded history, so it needs no extra checkpoint state and survives resume."""
+    if not patience:
+        return False
+    best, since = float("inf"), 0
+    for record in history:
+        if record["val_loss"] < best - min_delta:
+            best, since = record["val_loss"], 0
+        else:
+            since += 1
+    return since >= patience
 
 
 class TrainingAborted(RuntimeError):
@@ -248,7 +263,12 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
     if invalid_path.is_file():
         invalid_ids = set(json.loads(invalid_path.read_text(encoding="utf-8")))
 
-    for epoch in range(start_epoch, int(config["epochs"])):
+    patience, min_delta = int(config["early_stopping_patience"]), float(config["early_stopping_min_delta"])
+    if early_stop_due(history, patience, min_delta):  # resuming a run that had already stopped early
+        status, last_epoch = "early_stopped", start_epoch
+    else:
+        last_epoch = int(config["epochs"])
+    for epoch in range(start_epoch, last_epoch):
         epoch_started = time.perf_counter()
         if torch_device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
@@ -326,6 +346,9 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
                        "data_wait_seconds": round(data_wait, 3), "train_images": epoch_images,
                        "device": str(torch_device), "val_loss": val_loss,
                        "cuda_peak_gb": round(torch.cuda.max_memory_allocated() / 1e9, 3) if torch_device.type == "cuda" else None})
+        if early_stop_due(history, patience, min_delta):
+            status = "early_stopped"
+            break
         if stop_after_epochs is not None and epoch + 1 < int(config["epochs"]) and \
                 (epoch + 1 - start_epoch) >= stop_after_epochs:
             status = "paused_epoch_limit"
@@ -338,6 +361,7 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
                    "seconds": time.perf_counter() - session_started})
     return {"status": status, "checkpoint": str(last), "final_epoch": history[-1]["epoch"] if history else 0,
             "resumed_from_epoch": resumed_from, "best_val_loss": -best if best is not None else None,
+            "best_epoch": min(history, key=lambda h: h["val_loss"])["epoch"] if history else None,
             "history": history, "invalid_samples": invalid, "invalid_study_ids_file": str(invalid_path) if invalid_ids else None, "device": str(torch_device),
             "runtime": summarize_runtime(out_dir)}
 

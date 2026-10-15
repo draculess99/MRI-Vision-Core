@@ -73,7 +73,9 @@ def _select(args, metadata, manifest, config):
     if bad:
         (args.work_dir / "preflight_excluded.json").write_text(json.dumps(bad, indent=2))
         print(f"excluding {len(bad)} studies with missing series (IDs and reasons in preflight_excluded.json)")
-    keep = [i for i, uid in enumerate(manifest.ids) if uid not in bad]
+    excluded_file = getattr(args, "exclude_studies", None)
+    excluded_extra = set(json.loads(Path(excluded_file).read_text())) if excluded_file else set()
+    keep = [i for i, uid in enumerate(manifest.ids) if uid not in bad and uid not in excluded_extra]
     selection = None
     if getattr(args, "smoke_subset", 0):  # stratified: both classes of each Tier 1 target where feasible
         selection = select_smoke_subset([manifest.ids[i] for i in keep], manifest.values[keep], manifest.masks[keep],
@@ -105,11 +107,53 @@ def cmd_train(args) -> int:
                                      cache_dir=config.get("cache_dir"))
 
     (args.work_dir / "config.json").write_text(json.dumps(config, indent=2))
+
+    def split_counts(idx):
+        counts = {}
+        for j, t in enumerate(TARGET_COLUMNS):
+            on = masks[idx, j] == 1
+            if on.any():
+                counts[t] = {"positive": int(((values[idx, j] == 1) & on).sum()), "negative": int(((values[idx, j] == 0) & on).sum())}
+        return counts
+
+    (args.work_dir / "split_summary.json").write_text(json.dumps(
+        {"included_studies": len(ids), "train_studies": len(train_idx), "validation_studies": len(val_idx),
+         "train_targets": split_counts(train_idx), "validation_targets": split_counts(val_idx),
+         "manifest_sha256": manifest.sha256, "dataset_fingerprint": fingerprint}, indent=2))
     result = train_weak_label(make(train_idx), make(val_idx), config, args.work_dir, fingerprint=fingerprint,
                               train_ids=[ids[i] for i in train_idx], val_ids=[ids[i] for i in val_idx], resume=True,
                               max_seconds=args.max_seconds, export_dir=args.export_dir,
                               stop_after_epochs=args.stop_after_epochs or None)
     print(json.dumps({k: v for k, v in result.items() if k != "history"}, indent=2, default=float))
+    return 0
+
+
+def cmd_cache_warm(args) -> int:
+    """Decode every selected study once with worker processes: fills the cache, times it, and lists unreadable studies."""
+    import time
+    import torch
+    from torch.utils.data import DataLoader
+    metadata, manifest, gold = _load(args)
+    config = _config(args)
+    ids, values, masks, _, excluded = _select(args, metadata, manifest, config)
+    cache_dir = Path(config["cache_dir"])
+    before = len(list(cache_dir.glob("*.pt"))) if cache_dir.is_dir() else 0
+    dataset = WeakLabelDicomDataset(metadata, ids, values, masks, config, on_error="skip", cache_dir=cache_dir)
+    loader = DataLoader(dataset, batch_size=8, shuffle=False, num_workers=int(config["num_workers"]))
+    bad, started, done = [], time.perf_counter(), 0
+    for batch in loader:
+        done += len(batch["valid"])
+        bad.extend(u for u, v in zip(batch["study_uid"], batch["valid"].tolist()) if not v)
+    seconds = time.perf_counter() - started
+    after = len(list(cache_dir.glob("*.pt")))
+    report = {"studies": len(ids), "unreadable": len(bad), "cache_entries_before": before, "cache_entries_after": after,
+              "cache_bytes": sum(f.stat().st_size for f in cache_dir.glob("*.pt")), "seconds": round(seconds, 1),
+              "seconds_per_study": round(seconds / max(len(ids), 1), 3), "workers": int(config["num_workers"]),
+              "excluded_missing_series": len(excluded)}
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    (args.work_dir / "excluded_unreadable.json").write_text(json.dumps(sorted(bad)))
+    (args.work_dir / "cache_warm.json").write_text(json.dumps(report, indent=2))
+    print(json.dumps(report, indent=2))
     return 0
 
 
@@ -185,7 +229,7 @@ def cmd_real_preflight(args) -> int:
                                      "p95": float(np.percentile(latencies, 95)) if latencies else None,
                                      "total": float(np.sum(latencies)) if latencies else None},
         "valid_slices_per_study_mean": float(np.mean(slices)) if slices else None, "tensor_shape": list(expected),
-        "cache_bytes": cache_bytes, "free_disk_gb": round(shutil.disk_usage(args.work_dir).free / 1e9, 1),
+        "cache_bytes": cache_bytes, "cache_hits": dataset.cache_hits, "cache_misses": dataset.cache_misses, "free_disk_gb": round(shutil.disk_usage(args.work_dir).free / 1e9, 1),
         "class_balance": selection["class_balance"] if selection else None,
         "unmet_quota": selection["unmet_quota"] if selection else None, "device": device_info()}
     if torch.cuda.is_available():
@@ -261,7 +305,7 @@ def cmd_smoke(args) -> int:
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("preflight", "real-preflight", "verify-checkpoint", "train", "evaluate-gold", "export"):
+    for name in ("preflight", "real-preflight", "verify-checkpoint", "cache-warm", "train", "evaluate-gold", "export"):
         p = sub.add_parser(name)
         p.add_argument("--input-root", type=Path, default=INPUT_ROOT)
         p.add_argument("--data-dir", type=Path, default=None)
@@ -278,7 +322,10 @@ def build_parser():
     sub.choices["train"].add_argument("--stop-after-epochs", type=int, default=0,
                                       help="end this session cleanly after N epochs (the run can be resumed later)")
     sub.choices["verify-checkpoint"].add_argument("--checkpoint", type=Path, required=True)
-    for name in ("train", "real-preflight", "verify-checkpoint"):
+    for name in ("train", "real-preflight", "verify-checkpoint", "cache-warm"):
+        sub.choices[name].add_argument("--exclude-studies", type=Path, default=None,
+                                       help="JSON list of study IDs to leave out (e.g. unreadable series found by cache-warm)")
+    for name in ("train", "real-preflight", "verify-checkpoint", "cache-warm"):
         sub.choices[name].add_argument("--min-per-class", type=int, default=8,
                                        help="quota of positive and negative studies per active target in the subset")
         sub.choices[name].add_argument("--smoke-subset", type=int, default=0,
@@ -307,7 +354,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.command not in ("export", "smoke") and args.manifest is None:
         parser.error("--manifest is required")
-    handlers = {"preflight": cmd_preflight, "real-preflight": cmd_real_preflight, "verify-checkpoint": cmd_verify_checkpoint, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
+    handlers = {"preflight": cmd_preflight, "real-preflight": cmd_real_preflight, "verify-checkpoint": cmd_verify_checkpoint, "cache-warm": cmd_cache_warm, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
                 "smoke": cmd_smoke}
     return handlers[args.command](args)
 
