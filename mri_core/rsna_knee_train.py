@@ -16,7 +16,6 @@ from .rsna_knee_dataset import (PLANE_NAMES, TARGET_COLUMNS, RSNAKneeMetadata,
                                 load_series_volume, select_series, split_labeled_studies)
 from .rsna_knee_model import RSNAKneeCNN
 
-from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 
 def seed_everything(seed: int):
     random.seed(seed)
@@ -90,6 +89,9 @@ def _macro_loss(losses):
 
 
 def split_labeled_studies_cv(metadata: RSNAKneeMetadata, n_splits: int, fold: int, seed: int):
+    # imported lazily: only cross-validation needs it, and the Kaggle image does not ship iterative-stratification
+    from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
+
     labeled = metadata.complete_label_train.reset_index(drop=True)
 
     if len(labeled) < n_splits:

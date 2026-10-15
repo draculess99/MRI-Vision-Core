@@ -219,3 +219,14 @@ class TestTrainCliEndToEnd:
         # a different subset must not silently resume the same checkpoint
         with pytest.raises(CheckpointIncompatibleError):
             experiment_cli(base[:-1] + ["7", "--epochs-override", "1"])
+
+
+class TestKaggleImageCompatibility:
+    def test_experiment_and_submission_import_without_iterative_stratification(self):
+        """The Kaggle image has no iterstrat and no internet; the weak-label path must not need it (found on first GPU run)."""
+        import subprocess, sys
+        code = ("import sys; sys.modules['iterstrat'] = None; sys.modules['iterstrat.ml_stratifiers'] = None; "
+                "sys.path[:0] = [r'%s', r'%s']; import kaggle_weak_label_experiment, kaggle_weak_label_submit; "
+                "import mri_core.weak_label_smoke; print('ok')" % (REPO, REPO / "scripts"))
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(REPO.parent))
+        assert out.returncode == 0 and "ok" in out.stdout, out.stderr[-600:]
