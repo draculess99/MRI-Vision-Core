@@ -1,0 +1,208 @@
+"""Kaggle-native weak-label experiment: preflight / train / evaluate-gold / export (offline, GPU optional).
+
+Training and submission are separate workflows (see kaggle_weak_label_submit.py). Nothing here uses the network:
+the competition data, the weak-label manifest, the code, and any pretrained weights are all Kaggle inputs.
+"""
+
+import argparse
+import hashlib
+import json
+import sys
+import zipfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from kaggle_rsna_runner import INPUT_ROOT, WORKING_ROOT, device_info, discover_data, find_dicom_root
+from mri_core.rsna_checkpoint import studies_fingerprint
+from mri_core.rsna_knee_dataset import TARGET_COLUMNS, load_rsna_metadata
+from mri_core.weak_label_data import (WeakLabelDicomDataset, assert_no_leakage, hash_split, load_weak_manifest,
+                                      preflight_series)
+from mri_core.weak_label_train import (DEFAULT_CONFIG, GoldAlreadyScoredError, evaluate_gold, sha256_file,
+                                       summarize_runtime, train_weak_label)
+
+EXPORT_NAMES = ("last.pt", "last_best.pt", "config.json", "runtime_log.jsonl", "gold_eval.json", "preflight.json",
+                "invalid_studies.json")
+
+
+def _paths(args):
+    if args.data_dir is not None:
+        return args.data_dir, args.dicom_root or find_dicom_root(args.data_dir)
+    return discover_data(args.input_root)
+
+
+def _config(args) -> dict:
+    config = {**DEFAULT_CONFIG, **(json.loads(args.config.read_text()) if args.config else {})}
+    if args.arm:
+        config["arm"] = args.arm
+    return config
+
+
+def _load(args):
+    meta_dir, dicom_root = _paths(args)
+    metadata = load_rsna_metadata(meta_dir, dicom_root)
+    manifest = load_weak_manifest(args.manifest)
+    gold = metadata.complete_label_train
+    test_ids = set(metadata.test["StudyInstanceUID"].astype(str)) | set(metadata.sample_submission["StudyInstanceUID"].astype(str))
+    assert_no_leakage(manifest.ids, [], gold_ids=gold["StudyInstanceUID"], test_ids=test_ids)
+    return metadata, manifest, gold
+
+
+def cmd_preflight(args) -> int:
+    metadata, manifest, gold = _load(args)
+    config = _config(args)
+    problems = preflight_series(metadata, manifest.ids, config["planes"])
+    counts = {t: int(m) for t, m in zip(TARGET_COLUMNS, manifest.masks.sum(axis=0)) if m > 0}
+    report = {"manifest_sha256": manifest.sha256, "studies": len(manifest.ids), "active_targets": list(counts),
+              "trainable_counts": counts, "gold_studies": int(len(gold)), "gold_overlap": 0,
+              "studies_with_series_problems": len(problems),
+              "problem_examples": [{"study": "..." + u[-6:], "reasons": r} for u, r in list(problems.items())[:5]],
+              "device": device_info()}
+    print(json.dumps(report, indent=2))
+    if args.work_dir:
+        args.work_dir.mkdir(parents=True, exist_ok=True)
+        (args.work_dir / "preflight.json").write_text(json.dumps(report, indent=2))
+    return 0 if not problems else 1
+
+
+def cmd_train(args) -> int:
+    metadata, manifest, _ = _load(args)
+    config = _config(args)
+    if args.epochs_override:
+        config["epochs"] = args.epochs_override
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    bad = preflight_series(metadata, manifest.ids, config["planes"])
+    if bad:
+        (args.work_dir / "preflight_excluded.json").write_text(json.dumps(bad, indent=2))
+        print(f"excluding {len(bad)} studies with missing series (IDs and reasons in preflight_excluded.json)")
+    keep = [i for i, uid in enumerate(manifest.ids) if uid not in bad]
+    if args.max_studies:  # deterministic subset (by UID hash) for smoke tests; recorded in the dataset fingerprint
+        keep = sorted(keep, key=lambda i: hashlib.sha256(f"subset:{manifest.ids[i]}".encode()).hexdigest())[:args.max_studies]
+        keep.sort()
+    ids = [manifest.ids[i] for i in keep]
+    values, masks = manifest.values[keep], manifest.masks[keep]
+    train_idx, val_idx = hash_split(ids, float(config["val_fraction"]), int(config["seed"]))
+    fingerprint = hashlib.sha256(f"{manifest.fingerprint()}:{studies_fingerprint(ids)}".encode()).hexdigest()
+
+    def make(idx):
+        return WeakLabelDicomDataset(metadata, [ids[i] for i in idx], values[idx], masks[idx], config, on_error="skip",
+                                     cache_dir=config.get("cache_dir"))
+
+    (args.work_dir / "config.json").write_text(json.dumps(config, indent=2))
+    result = train_weak_label(make(train_idx), make(val_idx), config, args.work_dir, fingerprint=fingerprint,
+                              train_ids=[ids[i] for i in train_idx], val_ids=[ids[i] for i in val_idx], resume=True,
+                              max_seconds=args.max_seconds, export_dir=args.export_dir)
+    print(json.dumps({k: v for k, v in result.items() if k != "history"}, indent=2, default=float))
+    return 0
+
+
+def cmd_evaluate_gold(args) -> int:
+    metadata, _, gold = _load(args)
+    try:
+        report = evaluate_gold(args.checkpoint, metadata, gold.reset_index(drop=True), ledger_path=args.ledger,
+                               force=args.force, rounds=args.rounds)
+    except GoldAlreadyScoredError as exc:
+        print(f"REFUSED: {exc}")
+        return 2
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    (args.work_dir / "gold_eval.json").write_text(json.dumps(report, indent=2, default=float))
+    keys = ("arm", "epoch", "macro_auc", "macro_ci95", "headline_macro_auc", "headline_ci95")
+    print(json.dumps({k: report[k] for k in keys}, indent=2))
+    return 0
+
+
+def cmd_export(args) -> int:
+    """Copy run artifacts to the export dir, re-hash every copy, and write provenance + a SHA-256 manifest + a zip."""
+    args.export_dir.mkdir(parents=True, exist_ok=True)
+    files = {}
+    for name in EXPORT_NAMES:
+        source = args.work_dir / name
+        if source.is_file():
+            target = args.export_dir / name
+            target.write_bytes(source.read_bytes())
+            digest = sha256_file(source)
+            if sha256_file(target) != digest:
+                raise OSError(f"export copy of {name} does not match its source")
+            files[name] = {"sha256": digest, "bytes": source.stat().st_size}
+    if "last.pt" not in files:
+        raise FileNotFoundError(f"no last.pt in {args.work_dir}")
+    import torch
+    state = torch.load(args.export_dir / "last.pt", map_location="cpu", weights_only=True)
+    provenance = {"arm": state["config"].get("arm"), "epoch": int(state["epoch"]), "global_step": int(state["global_step"]),
+                  "dataset_fingerprint": state["dataset_fingerprint"], "config": state["config"],
+                  "n_train_studies": len(state["train_study_ids"]), "n_valid_studies": len(state["valid_study_ids"]),
+                  "target_columns": state["target_columns"], "torch": torch.__version__,
+                  "cuda": torch.version.cuda, "gpus": device_info().get("gpus", []),
+                  "note": "weak-label validation only was used for checkpoint selection"}
+    (args.export_dir / "provenance.json").write_text(json.dumps(provenance, indent=2, default=str))
+    files["provenance.json"] = {"sha256": sha256_file(args.export_dir / "provenance.json"),
+                                "bytes": (args.export_dir / "provenance.json").stat().st_size}
+    (args.export_dir / "MANIFEST.json").write_text(json.dumps({**files, "runtime": summarize_runtime(args.work_dir)}, indent=2))
+    archive = args.export_dir / "weak_label_run_export.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for name in [*files, "MANIFEST.json"]:
+            bundle.write(args.export_dir / name, name)
+    print(json.dumps({"archive": str(archive), "files": files}, indent=2))
+    return 0
+
+
+def cmd_smoke(args) -> int:
+    from mri_core.weak_label_smoke import run_synthetic_smoke
+    report = run_synthetic_smoke(args.work_dir, arms=args.arms, device=args.device, amp=not args.no_amp,
+                                 studies=args.studies, image_size=args.image_size, slices=args.slices,
+                                 batch_size=args.batch_size)
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    (args.work_dir / "smoke_report.json").write_text(json.dumps(report, indent=2, default=str))
+    print(json.dumps(report, indent=2, default=str))
+    return 0 if report["checks_passed"] else 1
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("preflight", "train", "evaluate-gold", "export"):
+        p = sub.add_parser(name)
+        p.add_argument("--input-root", type=Path, default=INPUT_ROOT)
+        p.add_argument("--data-dir", type=Path, default=None)
+        p.add_argument("--dicom-root", type=Path, default=None)
+        p.add_argument("--manifest", type=Path, default=None, help="weak-label manifest .jsonl (a Kaggle input)")
+        p.add_argument("--work-dir", type=Path, default=WORKING_ROOT / "outputs" / "weak-label")
+        p.add_argument("--config", type=Path, default=None)
+        p.add_argument("--arm", choices=("A", "B", "C"), default=None)
+    sub.choices["train"].add_argument("--max-seconds", type=float, default=None,
+                                      help="stop cleanly after the epoch that would exceed this")
+    sub.choices["train"].add_argument("--export-dir", type=Path, default=None,
+                                      help="copy checkpoints here after every epoch")
+    sub.choices["train"].add_argument("--epochs-override", type=int, default=0)
+    sub.choices["train"].add_argument("--max-studies", type=int, default=0,
+                                      help="train on a deterministic subset of this many studies (smoke tests)")
+    sub.choices["evaluate-gold"].add_argument("--checkpoint", type=Path, required=True)
+    sub.choices["evaluate-gold"].add_argument("--ledger", type=Path, required=True)
+    sub.choices["evaluate-gold"].add_argument("--force", action="store_true")
+    sub.choices["evaluate-gold"].add_argument("--rounds", type=int, default=1000)
+    sub.choices["export"].add_argument("--export-dir", type=Path, default=WORKING_ROOT / "export")
+    smoke = sub.add_parser("smoke", help="synthetic GPU/AMP smoke test; needs no data, manifest or network")
+    smoke.add_argument("--work-dir", type=Path, default=WORKING_ROOT / "outputs" / "smoke")
+    smoke.add_argument("--arms", nargs="+", choices=("A", "B", "C"), default=["A", "B", "C"])
+    smoke.add_argument("--device", default="auto")
+    smoke.add_argument("--no-amp", action="store_true")
+    smoke.add_argument("--studies", type=int, default=24)
+    smoke.add_argument("--image-size", type=int, default=128)
+    smoke.add_argument("--slices", type=int, default=9)
+    smoke.add_argument("--batch-size", type=int, default=8)
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command not in ("export", "smoke") and args.manifest is None:
+        parser.error("--manifest is required")
+    handlers = {"preflight": cmd_preflight, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
+                "smoke": cmd_smoke}
+    return handlers[args.command](args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

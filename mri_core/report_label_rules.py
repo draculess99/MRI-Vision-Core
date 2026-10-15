@@ -438,6 +438,17 @@ class RuleBasedExtractor:
     version = EXTRACTOR_VERSION
     method = METHOD
 
+    @property
+    def source_sha256(self) -> str:
+        """Hash of the rule and language sources, recorded in manifests as extractor provenance."""
+        import hashlib
+        from pathlib import Path
+        here = Path(__file__).resolve().parent
+        digest = hashlib.sha256()
+        for name in ("report_label_rules.py", "report_label_language.py"):
+            digest.update((here / name).read_bytes())
+        return digest.hexdigest()
+
     def extract(self, report_text: str, study_uid: Optional[str] = None) -> ReportLabels:
         language = detect_language(report_text or "")
         if not is_supported(language):

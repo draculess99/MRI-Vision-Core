@@ -32,7 +32,11 @@ def main(argv=None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--include-evidence", action="store_true", help="store evidence sentences (default: hashes only)")
-    parser.add_argument("--min-decided", type=int, default=1)
+    parser.add_argument("--min-decided", type=int, default=1,
+                        help="minimum decided (positive/negative) ACTIVE targets a study needs to be included")
+    parser.add_argument("--active-targets", default=None,
+                        help='comma-separated targets allowed to train, e.g. "ACL,Medial Meniscus,Lateral Meniscus"; '
+                             "all other targets keep their extracted state but are masked (default: all 12)")
     args = parser.parse_args(argv)
     if not args.dry_run and args.output is None:
         parser.error("--output is required unless --dry-run")
@@ -40,8 +44,11 @@ def main(argv=None) -> int:
     test_ids = _ids(args.test_csv) + _ids(args.sample_submission)
     rows, summary = build_manifest(train, RuleBasedExtractor(), test_ids=test_ids, holdout_ids=_ids(args.holdout_csv),
                                    include_evidence=args.include_evidence, min_decided=args.min_decided,
-                                   train_csv_sha256=sha256_file(args.train_csv))
-    print(json.dumps({k: summary[k] for k in ("extractor_version", "counts", "languages_eligible", "trainable", "manifest_sha256")},
+                                   train_csv_sha256=sha256_file(args.train_csv),
+                                   active_targets=None if args.active_targets is None else
+                                   [t.strip() for t in args.active_targets.split(",") if t.strip()])
+    print(json.dumps({k: summary[k] for k in ("extractor_version", "counts", "leakage_checks", "languages_eligible", "trainable",
+                                         "manifest_sha256")},
                      indent=2))
     if args.dry_run:
         print("DRY RUN: nothing written")

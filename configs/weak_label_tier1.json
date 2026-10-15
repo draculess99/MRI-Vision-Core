@@ -1,0 +1,22 @@
+{
+  "arm": "A",
+  "seed": 0,
+  "epochs": 15,
+  "batch_size": 8,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0001,
+  "warmup_epochs": 1,
+  "dropout": 0.2,
+  "image_size": 128,
+  "slices_per_series": 9,
+  "planes": ["Axial", "Coronal", "Sagittal"],
+  "num_workers": 4,
+  "val_fraction": 0.1,
+  "max_pos_weight": 10.0,
+  "reliability_weights": {"ACL": 1.0, "Medial Meniscus": 1.0, "Lateral Meniscus": 1.0},
+  "amp": true,
+  "device": "auto",
+  "cache_dir": "/kaggle/working/decode_cache",
+  "pretrained_weights": null,
+  "encoder_input_size": null
+}

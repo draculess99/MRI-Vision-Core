@@ -21,12 +21,12 @@ import hashlib
 import json
 from collections import Counter
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 
-from .report_labels import LabelState, ReportLabelExtractor, ReportLabels, to_training_arrays
+from .report_labels import DECIDED_STATES, LabelState, ReportLabelExtractor, ReportLabels, to_training_arrays
 from .rsna_knee_dataset import TARGET_COLUMNS
 
 SCHEMA = "weak-label-manifest/1"
@@ -85,13 +85,15 @@ def assert_no_leakage(manifest_ids: Iterable[str], *, gold_ids: Iterable[str], t
             raise LeakageError(f"{len(overlap)} manifest studies overlap with the {name} set")
 
 
-def _row(labels: ReportLabels, include_evidence: bool) -> dict:
+def _row(labels: ReportLabels, include_evidence: bool, active: frozenset) -> dict:
     values, mask = to_training_arrays(labels)
     targets = {}
     for i, label in enumerate(labels.labels):
         entry = label.to_dict(include_evidence)
-        entry["mask"] = int(mask[i])
-        entry["value"] = None if mask[i] == 0 else float(values[i])
+        inactive = label.target not in active
+        entry["mask"] = 0 if inactive else int(mask[i])
+        entry["value"] = None if entry["mask"] == 0 else float(values[i])
+        entry["tier_masked"] = bool(inactive)  # the extracted state is kept for provenance but never trains
         targets[label.target] = entry
     return {"study_uid": labels.study_uid, "language": labels.language, "supported": labels.supported,
             "method": labels.method, "extractor_version": labels.extractor_version, "targets": targets}
@@ -99,10 +101,19 @@ def _row(labels: ReportLabels, include_evidence: bool) -> dict:
 
 def build_manifest(train: pd.DataFrame, extractor: ReportLabelExtractor, *, test_ids: Iterable[str] = (),
                    holdout_ids: Iterable[str] = (), include_evidence: bool = False, min_decided: int = 1,
-                   include_unsupported: bool = False, train_csv_sha256: Optional[str] = None):
-    """Return (rows, summary). Pure function: no files are read or written."""
+                   include_unsupported: bool = False, train_csv_sha256: Optional[str] = None,
+                   active_targets: Optional[Sequence[str]] = None):
+    """Return (rows, summary). Pure function: no files are read or written.
+
+    active_targets: targets that may train (default all 12). Others are masked with tier_masked=True, and
+    do not count toward min_decided.
+    """
     if min_decided < 0:
         raise ManifestError("min_decided must be >= 0")
+    active = frozenset(TARGET_COLUMNS if active_targets is None else active_targets)
+    unknown = active - set(TARGET_COLUMNS)
+    if unknown or not active:
+        raise ManifestError(f"active_targets must be a non-empty subset of the 12 targets (got unknown: {sorted(unknown)})")
     test_ids, holdout_ids = list(map(str, test_ids)), list(map(str, holdout_ids))
     eligible, exclusions, gold_ids = select_eligible(train, test_ids=test_ids, holdout_ids=holdout_ids)
     rows, state_counts = [], {t: Counter() for t in TARGET_COLUMNS}
@@ -114,26 +125,34 @@ def build_manifest(train: pd.DataFrame, extractor: ReportLabelExtractor, *, test
             unsupported += 1
             if not include_unsupported:
                 continue
-        elif labels.decided_count() < min_decided:
+        elif sum(l.state in DECIDED_STATES for l in labels.labels if l.target in active) < min_decided:
             below_min += 1
             continue
         for label in labels.labels:
             state_counts[label.target][label.state.value] += 1
-        rows.append(_row(labels, include_evidence))
+        rows.append(_row(labels, include_evidence, active))
     rows.sort(key=lambda r: r["study_uid"])
     assert_no_leakage([r["study_uid"] for r in rows], gold_ids=gold_ids, test_ids=test_ids, holdout_ids=holdout_ids)
     body = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
+    trainable = {t: {"positive": state_counts[t]["positive"], "negative": state_counts[t]["negative"]}
+                 for t in TARGET_COLUMNS if t in active}
+    for t, counts in trainable.items():
+        decided = counts["positive"] + counts["negative"]
+        counts["positive_fraction"] = round(counts["positive"] / decided, 4) if decided else None
+        counts["coverage_of_included"] = round(decided / len(rows), 4) if rows else None
     summary = {
-        "schema": SCHEMA, "extractor_version": extractor.version, "train_csv_sha256": train_csv_sha256,
+        "schema": SCHEMA, "extractor_version": extractor.version,
+        "extractor_source_sha256": getattr(extractor, "source_sha256", None), "train_csv_sha256": train_csv_sha256,
         "config": {"include_evidence": include_evidence, "min_decided": min_decided,
                    "include_unsupported": include_unsupported, "n_test_ids": len(test_ids),
-                   "n_holdout_ids": len(holdout_ids)},
+                   "n_holdout_ids": len(holdout_ids), "active_targets": [t for t in TARGET_COLUMNS if t in active]},
         "counts": {**exclusions, "unsupported_language": unsupported, "below_min_decided": below_min,
                    "included": len(rows)},
+        "leakage_checks": {"gold_studies_excluded": len(gold_ids), "overlap_with_gold": 0,
+                           "overlap_with_test": 0, "overlap_with_holdout": 0},
         "languages_eligible": dict(sorted(languages.items())),
         "state_counts": {t: {s.value: state_counts[t][s.value] for s in LabelState} for t in TARGET_COLUMNS},
-        "trainable": {t: {"positive": state_counts[t]["positive"], "negative": state_counts[t]["negative"]}
-                      for t in TARGET_COLUMNS},
+        "trainable": trainable,
         "manifest_sha256": sha256_bytes(body.encode("utf-8")),
     }
     return rows, summary
