@@ -127,6 +127,10 @@ class WeakLabelDicomDataset(RSNAKneeDicomDataset):
             return None
         return self.cache_dir / f"{hashlib.sha1(f'v{CACHE_VERSION}:{uid}:{self._shape_key}'.encode()).hexdigest()}.pt"
 
+    def _cache_meta(self, uid: str) -> dict:
+        """Identity stored inside every entry: a file copied under the wrong name or built with other settings is rejected."""
+        return {"uid": uid, "settings": self._shape_key, "version": CACHE_VERSION}
+
     def _valid_cache_entry(self, images: torch.Tensor, mask: torch.Tensor) -> bool:
         size, slices = int(self.config["image_size"]), int(self.config["slices_per_series"])
         planes = len(self.config.get("planes", PLANE_NAMES))
@@ -142,7 +146,7 @@ class WeakLabelDicomDataset(RSNAKneeDicomDataset):
             try:
                 blob = torch.load(path, map_location="cpu", weights_only=True)
                 images, mask = blob["images"].float(), blob["mask"]
-                if self._valid_cache_entry(images, mask):
+                if blob.get("meta") == self._cache_meta(uid) and self._valid_cache_entry(images, mask):
                     return {"images": images, "mask": mask, "study_uid": uid}
             except Exception:
                 pass  # unreadable or stale entry: fall through, re-decode and atomically rewrite it
@@ -150,7 +154,7 @@ class WeakLabelDicomDataset(RSNAKneeDicomDataset):
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             temp = path.with_suffix(f".{os.getpid()}.tmp")  # per-process name; rename is atomic
-            torch.save({"images": sample["images"].half(), "mask": sample["mask"]}, temp)
+            torch.save({"images": sample["images"].half(), "mask": sample["mask"], "meta": self._cache_meta(uid)}, temp)
             temp.replace(path)
             sample = {"images": sample["images"].half().float(), "mask": sample["mask"], "study_uid": uid}
         return sample

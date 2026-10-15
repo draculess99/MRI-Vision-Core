@@ -98,7 +98,14 @@ def _rng_states():
 def _restore_rng_states(checkpoint):
     torch.set_rng_state(checkpoint["torch_rng"])
     if torch.cuda.is_available() and checkpoint.get("cuda_rng"):
-        torch.cuda.set_rng_state_all(checkpoint["cuda_rng"])
+        states = checkpoint["cuda_rng"]
+        devices = torch.cuda.device_count()
+        if len(states) != devices:  # resumed on a different GPU count: restore what exists, warn about the rest
+            import warnings
+            warnings.warn(f"checkpoint has CUDA RNG state for {len(states)} device(s) but {devices} are visible; "
+                          "restoring the overlapping devices only", RuntimeWarning, stacklevel=2)
+        for index, state in enumerate(states[:devices]):
+            torch.cuda.set_rng_state(state, index)
     random.setstate(_destringify_python_rng(checkpoint["python_rng"]))
     numpy_state = checkpoint["numpy_rng"]
     np.random.set_state((numpy_state[0], np.asarray(numpy_state[1], dtype=np.uint32), *numpy_state[2:]))

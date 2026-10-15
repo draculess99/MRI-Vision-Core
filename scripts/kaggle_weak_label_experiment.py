@@ -19,7 +19,7 @@ from mri_core.rsna_checkpoint import studies_fingerprint
 from mri_core.rsna_knee_dataset import TARGET_COLUMNS, load_rsna_metadata
 from mri_core.weak_label_data import (WeakLabelDicomDataset, assert_no_leakage, hash_split, load_weak_manifest,
                                       preflight_series, select_smoke_subset)
-from mri_core.weak_label_train import (DEFAULT_CONFIG, GoldAlreadyScoredError, evaluate_gold, sha256_file,
+from mri_core.weak_label_train import (DEFAULT_CONFIG, IDENTITY_KEYS, GoldAlreadyScoredError, evaluate_gold, sha256_file,
                                        summarize_runtime, train_weak_label)
 
 EXPORT_NAMES = ("last.pt", "last_best.pt", "config.json", "runtime_log.jsonl", "gold_eval.json", "preflight.json",
@@ -77,7 +77,8 @@ def _select(args, metadata, manifest, config):
     selection = None
     if getattr(args, "smoke_subset", 0):  # stratified: both classes of each Tier 1 target where feasible
         selection = select_smoke_subset([manifest.ids[i] for i in keep], manifest.values[keep], manifest.masks[keep],
-                                        args.smoke_subset, seed=int(config["seed"]))
+                                        args.smoke_subset, seed=int(config["seed"]),
+                                        min_per_class=getattr(args, "min_per_class", 8))
         keep = [keep[i] for i in selection["indices"]]
         (args.work_dir / "smoke_selection.json").write_text(json.dumps(
             {"studies": [manifest.ids[i] for i in keep], **{k: v for k, v in selection.items() if k != "indices"}}, indent=2))
@@ -106,9 +107,37 @@ def cmd_train(args) -> int:
     (args.work_dir / "config.json").write_text(json.dumps(config, indent=2))
     result = train_weak_label(make(train_idx), make(val_idx), config, args.work_dir, fingerprint=fingerprint,
                               train_ids=[ids[i] for i in train_idx], val_ids=[ids[i] for i in val_idx], resume=True,
-                              max_seconds=args.max_seconds, export_dir=args.export_dir)
+                              max_seconds=args.max_seconds, export_dir=args.export_dir,
+                              stop_after_epochs=args.stop_after_epochs or None)
     print(json.dumps({k: v for k, v in result.items() if k != "history"}, indent=2, default=float))
     return 0
+
+
+def cmd_verify_checkpoint(args) -> int:
+    """Read-only restore check: is this checkpoint compatible with the current manifest, selection and split?"""
+    import torch
+    metadata, manifest, _ = _load(args)
+    config = _config(args)
+    ids, _, _, _, _ = _select(args, metadata, manifest, config)
+    train_idx, val_idx = hash_split(ids, float(config["val_fraction"]), int(config["seed"]))
+    fingerprint = hashlib.sha256(f"{manifest.fingerprint()}:{studies_fingerprint(ids)}".encode()).hexdigest()
+    state = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    report = {
+        "checkpoint_sha256": sha256_file(args.checkpoint), "epoch": int(state["epoch"]), "global_step": int(state["global_step"]),
+        "arm": state["config"].get("arm"),
+        "state_present": {k: state.get(k) is not None for k in ("model", "optimizer", "scheduler", "scaler", "torch_rng",
+                                                                  "python_rng", "numpy_rng", "cuda_rng", "loader_rng")},
+        "fingerprint_matches": state["dataset_fingerprint"] == fingerprint,
+        "train_split_matches": sorted(state["train_study_ids"]) == sorted(ids[i] for i in train_idx),
+        "validation_split_matches": sorted(state["valid_study_ids"]) == sorted(ids[i] for i in val_idx),
+        "target_columns_match": list(state["target_columns"]) == list(TARGET_COLUMNS),
+        "scheduler_last_epoch": (state["scheduler"] or {}).get("last_epoch"),
+        "scaler_scale": (state["scaler"] or {}).get("scale") if state.get("scaler") else None,
+        "config_matches": all(state["config"].get(k) == config.get(k) for k in IDENTITY_KEYS)}
+    report["compatible"] = all(report[k] for k in ("fingerprint_matches", "train_split_matches", "validation_split_matches",
+                                                    "target_columns_match", "config_matches"))
+    print(json.dumps(report, indent=2))
+    return 0 if report["compatible"] else 1
 
 
 def cmd_real_preflight(args) -> int:
@@ -232,7 +261,7 @@ def cmd_smoke(args) -> int:
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("preflight", "real-preflight", "train", "evaluate-gold", "export"):
+    for name in ("preflight", "real-preflight", "verify-checkpoint", "train", "evaluate-gold", "export"):
         p = sub.add_parser(name)
         p.add_argument("--input-root", type=Path, default=INPUT_ROOT)
         p.add_argument("--data-dir", type=Path, default=None)
@@ -246,7 +275,12 @@ def build_parser():
     sub.choices["train"].add_argument("--export-dir", type=Path, default=None,
                                       help="copy checkpoints here after every epoch")
     sub.choices["train"].add_argument("--epochs-override", type=int, default=0)
-    for name in ("train", "real-preflight"):
+    sub.choices["train"].add_argument("--stop-after-epochs", type=int, default=0,
+                                      help="end this session cleanly after N epochs (the run can be resumed later)")
+    sub.choices["verify-checkpoint"].add_argument("--checkpoint", type=Path, required=True)
+    for name in ("train", "real-preflight", "verify-checkpoint"):
+        sub.choices[name].add_argument("--min-per-class", type=int, default=8,
+                                       help="quota of positive and negative studies per active target in the subset")
         sub.choices[name].add_argument("--smoke-subset", type=int, default=0,
                                        help="stratified deterministic subset of this many studies (real-data smoke test)")
         sub.choices[name].add_argument("--max-studies", type=int, default=0,
@@ -273,7 +307,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.command not in ("export", "smoke") and args.manifest is None:
         parser.error("--manifest is required")
-    handlers = {"preflight": cmd_preflight, "real-preflight": cmd_real_preflight, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
+    handlers = {"preflight": cmd_preflight, "real-preflight": cmd_real_preflight, "verify-checkpoint": cmd_verify_checkpoint, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
                 "smoke": cmd_smoke}
     return handlers[args.command](args)
 

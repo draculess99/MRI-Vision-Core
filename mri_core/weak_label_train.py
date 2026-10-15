@@ -193,7 +193,8 @@ def _prepare(model, config):
 def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerprint: str, train_ids: Sequence[str],
                      val_ids: Sequence[str], resume: bool = True, scaler=None, device: Optional[str] = None,
                      batch_hook: Optional[Callable[[int, int], None]] = None, max_seconds: Optional[float] = None,
-                     export_dir: Optional[Path] = None, model_factory: Optional[Callable] = None) -> dict:
+                     export_dir: Optional[Path] = None, model_factory: Optional[Callable] = None,
+                     stop_after_epochs: Optional[int] = None) -> dict:
     """Train one arm. Returns a summary dict; status is "complete", "paused_time_budget" or raises."""
     config = {**DEFAULT_CONFIG, **config}
     out_dir = Path(out_dir)
@@ -237,7 +238,9 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
     session = _session_number(out_dir)
     _log(out_dir, {"event": "session_start", "session": session, "device": str(torch_device),
                    "gpus": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())],
-                   "resumed_from_epoch": resumed_from, "arm": config["arm"]})
+                   "resumed_from_epoch": resumed_from, "arm": config["arm"],
+                   "pos_weight": [round(float(x), 3) for x in pos_weight.cpu()],
+                   "trainable_entries": [int(x) for x in train_ds.masks.sum(axis=0)]})
     session_started = time.perf_counter()
     status, seen, invalid = "complete", 0, 0
     invalid_ids: set = set()
@@ -323,6 +326,10 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
                        "data_wait_seconds": round(data_wait, 3), "train_images": epoch_images,
                        "device": str(torch_device), "val_loss": val_loss,
                        "cuda_peak_gb": round(torch.cuda.max_memory_allocated() / 1e9, 3) if torch_device.type == "cuda" else None})
+        if stop_after_epochs is not None and epoch + 1 < int(config["epochs"]) and \
+                (epoch + 1 - start_epoch) >= stop_after_epochs:
+            status = "paused_epoch_limit"
+            break
         if max_seconds is not None and epoch + 1 < int(config["epochs"]) and \
                 (time.perf_counter() - session_started) + 1.2 * seconds > max_seconds:
             status = "paused_time_budget"
