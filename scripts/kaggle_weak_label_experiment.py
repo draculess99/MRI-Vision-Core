@@ -18,7 +18,7 @@ from kaggle_rsna_runner import INPUT_ROOT, WORKING_ROOT, device_info, discover_d
 from mri_core.rsna_checkpoint import studies_fingerprint
 from mri_core.rsna_knee_dataset import TARGET_COLUMNS, load_rsna_metadata
 from mri_core.weak_label_data import (WeakLabelDicomDataset, assert_no_leakage, hash_split, load_weak_manifest,
-                                      preflight_series)
+                                      preflight_series, select_smoke_subset)
 from mri_core.weak_label_train import (DEFAULT_CONFIG, GoldAlreadyScoredError, evaluate_gold, sha256_file,
                                        summarize_runtime, train_weak_label)
 
@@ -66,22 +66,36 @@ def cmd_preflight(args) -> int:
     return 0 if not problems else 1
 
 
-def cmd_train(args) -> int:
-    metadata, manifest, _ = _load(args)
-    config = _config(args)
-    if args.epochs_override:
-        config["epochs"] = args.epochs_override
+def _select(args, metadata, manifest, config):
+    """Studies that will actually be used: series present, then an optional deterministic subset. Pure and repeatable."""
     args.work_dir.mkdir(parents=True, exist_ok=True)
     bad = preflight_series(metadata, manifest.ids, config["planes"])
     if bad:
         (args.work_dir / "preflight_excluded.json").write_text(json.dumps(bad, indent=2))
         print(f"excluding {len(bad)} studies with missing series (IDs and reasons in preflight_excluded.json)")
     keep = [i for i, uid in enumerate(manifest.ids) if uid not in bad]
-    if args.max_studies:  # deterministic subset (by UID hash) for smoke tests; recorded in the dataset fingerprint
-        keep = sorted(keep, key=lambda i: hashlib.sha256(f"subset:{manifest.ids[i]}".encode()).hexdigest())[:args.max_studies]
-        keep.sort()
+    selection = None
+    if getattr(args, "smoke_subset", 0):  # stratified: both classes of each Tier 1 target where feasible
+        selection = select_smoke_subset([manifest.ids[i] for i in keep], manifest.values[keep], manifest.masks[keep],
+                                        args.smoke_subset, seed=int(config["seed"]))
+        keep = [keep[i] for i in selection["indices"]]
+        (args.work_dir / "smoke_selection.json").write_text(json.dumps(
+            {"studies": [manifest.ids[i] for i in keep], **{k: v for k, v in selection.items() if k != "indices"}}, indent=2))
+        print(json.dumps({"smoke_subset": len(keep), "candidates": selection["candidates"],
+                          "class_balance": selection["class_balance"], "unmet_quota": selection["unmet_quota"],
+                          "excluded_missing_series": len(bad)}))
+    elif getattr(args, "max_studies", 0):  # deterministic subset by UID hash
+        keep = sorted(sorted(keep, key=lambda i: hashlib.sha256(f"subset:{manifest.ids[i]}".encode()).hexdigest())[:args.max_studies])
     ids = [manifest.ids[i] for i in keep]
-    values, masks = manifest.values[keep], manifest.masks[keep]
+    return ids, manifest.values[keep], manifest.masks[keep], selection, bad
+
+
+def cmd_train(args) -> int:
+    metadata, manifest, _ = _load(args)
+    config = _config(args)
+    if args.epochs_override:
+        config["epochs"] = args.epochs_override
+    ids, values, masks, _, _ = _select(args, metadata, manifest, config)
     train_idx, val_idx = hash_split(ids, float(config["val_fraction"]), int(config["seed"]))
     fingerprint = hashlib.sha256(f"{manifest.fingerprint()}:{studies_fingerprint(ids)}".encode()).hexdigest()
 
@@ -95,6 +109,63 @@ def cmd_train(args) -> int:
                               max_seconds=args.max_seconds, export_dir=args.export_dir)
     print(json.dumps({k: v for k, v in result.items() if k != "history"}, indent=2, default=float))
     return 0
+
+
+def cmd_real_preflight(args) -> int:
+    """Read-only: decode the selected studies once and validate tensors, masks, latency, cache size, GPU and disk."""
+    import shutil
+    import time
+    import numpy as np
+    import torch
+    metadata, manifest, gold = _load(args)
+    config = _config(args)
+    ids, values, masks, selection, excluded = _select(args, metadata, manifest, config)
+    train_idx, val_idx = hash_split(ids, float(config["val_fraction"]), int(config["seed"]))
+    test_ids = set(metadata.test["StudyInstanceUID"].astype(str)) | set(metadata.sample_submission["StudyInstanceUID"].astype(str))
+    assert_no_leakage([ids[i] for i in train_idx], [ids[i] for i in val_idx], gold_ids=gold["StudyInstanceUID"], test_ids=test_ids)
+    dataset = WeakLabelDicomDataset(metadata, ids, values, masks, config, on_error="raise", cache_dir=config.get("cache_dir"))
+    latencies, problems, slices = [], [], []
+    expected = (len(config["planes"]), int(config["slices_per_series"]), 1, int(config["image_size"]), int(config["image_size"]))
+    for i in range(len(ids)):
+        started = time.perf_counter()
+        try:
+            sample = dataset[i]
+        except Exception as exc:  # report and keep going so every problem is visible
+            problems.append({"study": "..." + ids[i][-6:], "error": type(exc).__name__ + ": " + str(exc)[:160]})
+            continue
+        latencies.append(time.perf_counter() - started)
+        images, mask = sample["images"], sample["mask"]
+        error = None
+        if tuple(images.shape) != expected:
+            error = f"shape {tuple(images.shape)} != {expected}"
+        elif not bool(torch.isfinite(images).all()):
+            error = "non-finite pixel values"
+        elif not bool(mask.any(dim=1).all()):
+            error = "a plane has no valid slice"
+        elif float(images.min()) < -1e-6 or float(images.max()) > 1 + 1e-6:
+            error = "pixel range outside [0, 1]"
+        if error:
+            problems.append({"study": "..." + ids[i][-6:], "error": error})
+        slices.append(int(mask.sum()))
+    cache_dir = config.get("cache_dir")
+    cache_bytes = sum(f.stat().st_size for f in Path(cache_dir).glob("*.pt")) if cache_dir and Path(cache_dir).is_dir() else 0
+    report = {
+        "manifest_sha256": manifest.sha256, "studies_selected": len(ids), "train": len(train_idx), "validation": len(val_idx),
+        "excluded_missing_series": len(excluded), "decoded_ok": len(latencies), "problems": problems, "gold_or_test_overlap": 0,
+        "decode_seconds_per_study": {"mean": float(np.mean(latencies)) if latencies else None,
+                                     "p95": float(np.percentile(latencies, 95)) if latencies else None,
+                                     "total": float(np.sum(latencies)) if latencies else None},
+        "valid_slices_per_study_mean": float(np.mean(slices)) if slices else None, "tensor_shape": list(expected),
+        "cache_bytes": cache_bytes, "free_disk_gb": round(shutil.disk_usage(args.work_dir).free / 1e9, 1),
+        "class_balance": selection["class_balance"] if selection else None,
+        "unmet_quota": selection["unmet_quota"] if selection else None, "device": device_info()}
+    if torch.cuda.is_available():
+        free, total = torch.cuda.mem_get_info()
+        report["gpu_memory_free_gb"], report["gpu_memory_total_gb"] = round(free / 1e9, 2), round(total / 1e9, 2)
+    report["passed"] = bool(not problems and len(latencies) == len(ids) and len(ids) > 0)
+    (args.work_dir / "real_preflight.json").write_text(json.dumps(report, indent=2, default=float))
+    print(json.dumps({k: v for k, v in report.items() if k != "device"}, indent=2, default=float))
+    return 0 if report["passed"] else 1
 
 
 def cmd_evaluate_gold(args) -> int:
@@ -161,7 +232,7 @@ def cmd_smoke(args) -> int:
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("preflight", "train", "evaluate-gold", "export"):
+    for name in ("preflight", "real-preflight", "train", "evaluate-gold", "export"):
         p = sub.add_parser(name)
         p.add_argument("--input-root", type=Path, default=INPUT_ROOT)
         p.add_argument("--data-dir", type=Path, default=None)
@@ -175,8 +246,11 @@ def build_parser():
     sub.choices["train"].add_argument("--export-dir", type=Path, default=None,
                                       help="copy checkpoints here after every epoch")
     sub.choices["train"].add_argument("--epochs-override", type=int, default=0)
-    sub.choices["train"].add_argument("--max-studies", type=int, default=0,
-                                      help="train on a deterministic subset of this many studies (smoke tests)")
+    for name in ("train", "real-preflight"):
+        sub.choices[name].add_argument("--smoke-subset", type=int, default=0,
+                                       help="stratified deterministic subset of this many studies (real-data smoke test)")
+        sub.choices[name].add_argument("--max-studies", type=int, default=0,
+                                       help="deterministic UID-hash subset of this many studies")
     sub.choices["evaluate-gold"].add_argument("--checkpoint", type=Path, required=True)
     sub.choices["evaluate-gold"].add_argument("--ledger", type=Path, required=True)
     sub.choices["evaluate-gold"].add_argument("--force", action="store_true")
@@ -199,7 +273,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.command not in ("export", "smoke") and args.manifest is None:
         parser.error("--manifest is required")
-    handlers = {"preflight": cmd_preflight, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
+    handlers = {"preflight": cmd_preflight, "real-preflight": cmd_real_preflight, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
                 "smoke": cmd_smoke}
     return handlers[args.command](args)
 

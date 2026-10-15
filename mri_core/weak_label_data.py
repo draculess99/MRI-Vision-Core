@@ -173,3 +173,43 @@ class WeakLabelDicomDataset(RSNAKneeDicomDataset):
         sample["target_mask"] = torch.from_numpy(self.masks[index]) * (1.0 if valid else 0.0)
         sample["valid"] = torch.tensor(valid)
         return sample
+
+
+def select_smoke_subset(ids: Sequence[str], values: np.ndarray, masks: np.ndarray, n: int, *, min_per_class: int = 8,
+                        targets: Sequence[str] = ("ACL", "Medial Meniscus", "Lateral Meniscus"), seed: int = 0) -> dict:
+    """Deterministic, study-level subset of at most `n` studies for a smoke test.
+
+    Every candidate must already have >= 1 decided (mask 1) target among `targets`. Studies are visited in hash order;
+    a first pass takes studies that fill an unmet per-target/per-class quota (min_per_class positives and negatives where
+    feasible), a second pass fills up to n in the same hash order. Returns indices (sorted) plus a quota report.
+    """
+    cols = [TARGET_COLUMNS.index(t) for t in targets]
+    order = sorted(range(len(ids)), key=lambda i: hashlib.sha256(f"smoke:{seed}:{ids[i]}".encode()).hexdigest())
+    candidates = [i for i in order if masks[i, cols].sum() > 0]
+    quota = {(t, c): min_per_class for t in cols for c in (0.0, 1.0)}
+    chosen, taken = [], set()
+    for i in candidates:
+        if len(chosen) >= n or not any(v > 0 for v in quota.values()):
+            break
+        helps = [(t, float(values[i, t])) for t in cols if masks[i, t] == 1 and quota[(t, float(values[i, t]))] > 0]
+        if helps:
+            chosen.append(i)
+            taken.add(i)
+            for key in helps:
+                quota[key] -= 1
+    for i in candidates:
+        if len(chosen) >= n:
+            break
+        if i not in taken:
+            chosen.append(i)
+            taken.add(i)
+    chosen.sort()
+    balance = {}
+    for t in cols:
+        on = masks[chosen, t] == 1
+        balance[TARGET_COLUMNS[t]] = {"positive": int(((values[chosen, t] == 1) & on).sum()),
+                                      "negative": int(((values[chosen, t] == 0) & on).sum())}
+    return {"indices": chosen, "candidates": len(candidates),
+            "unmet_quota": {f"{TARGET_COLUMNS[t]}:{'positive' if c == 1.0 else 'negative'}": v
+                            for (t, c), v in quota.items() if v > 0},
+            "class_balance": balance}

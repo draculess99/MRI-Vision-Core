@@ -251,7 +251,9 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
             torch.cuda.reset_peak_memory_stats()
         model.train()
         losses = []
+        data_wait, epoch_images, wait_from = 0.0, 0, time.perf_counter()
         for batch in loader:
+            data_wait += time.perf_counter() - wait_from  # time the GPU loop spent waiting for decoded batches
             if batch_hook is not None:
                 batch_hook(epoch, step)
             optimizer.zero_grad(set_to_none=True)
@@ -269,12 +271,17 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), float(config["grad_clip"]))
                 optimizer.step()
-            losses.append(float(loss.detach().cpu()))
+            loss_value = float(loss.detach().cpu())
+            if not math.isfinite(loss_value):
+                raise TrainingAborted(f"non-finite training loss at global step {step + 1}; stopping before a bad checkpoint is written")
+            losses.append(loss_value)
+            epoch_images += int(batch["mask"][batch["valid"]].sum())
             seen += len(batch["valid"])
             bad = ~batch["valid"]
             invalid += int(bad.sum())
             invalid_ids.update(u for u, b in zip(batch["study_uid"], bad.tolist()) if b)
             step += 1
+            wait_from = time.perf_counter()
         scheduler.step()
         if invalid_ids:  # attribution: which studies were skipped (full UIDs stay in the work dir, not in printed logs)
             invalid_path.write_text(json.dumps(sorted(invalid_ids)), encoding="utf-8")
@@ -292,12 +299,15 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
                 v_labels.append(batch["labels"].numpy())
                 v_probs.append(logits.float().sigmoid().cpu().numpy())
                 v_masks.append(batch["target_mask"].numpy())
+        if not np.isfinite(v_losses).all():
+            raise TrainingAborted("non-finite validation loss; stopping before a bad checkpoint is written")
         auc = masked_auc(np.vstack(v_labels), np.vstack(v_probs), np.vstack(v_masks))
         defined = [a for a in auc.values() if a is not None]
         val_loss = float(np.mean(v_losses))
         record = {"epoch": epoch + 1, "train_loss": float(np.mean(losses)), "val_loss": val_loss,
                   "val_macro_auc_weak": float(np.mean(defined)) if defined else None,
-                  "val_auc_weak": auc, "lr": float(optimizer.param_groups[0]["lr"]), "invalid_samples": invalid, "invalid_studies": len(invalid_ids)}
+                  "val_auc_weak": auc, "lr": float(optimizer.param_groups[0]["lr"]), "invalid_samples": invalid, "invalid_studies": len(invalid_ids),
+                  "train_images": epoch_images, "data_wait_seconds": round(data_wait, 3)}
         history.append(record)
         score = -val_loss  # higher is better, as in the existing trainers
         is_best = best is None or score > best
@@ -310,6 +320,7 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
         _durable_copy(out_dir, export_dir)
         seconds = time.perf_counter() - epoch_started
         _log(out_dir, {"event": "epoch", "session": session, "epoch": epoch + 1, "seconds": seconds,
+                       "data_wait_seconds": round(data_wait, 3), "train_images": epoch_images,
                        "device": str(torch_device), "val_loss": val_loss,
                        "cuda_peak_gb": round(torch.cuda.max_memory_allocated() / 1e9, 3) if torch_device.type == "cuda" else None})
         if max_seconds is not None and epoch + 1 < int(config["epochs"]) and \
