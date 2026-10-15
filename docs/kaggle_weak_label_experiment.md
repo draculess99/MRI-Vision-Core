@@ -101,7 +101,19 @@ compare with `summarize_runtime` / `runtime_log.jsonl` (the smoke report prints 
 - Submission inference over about 1,300 test studies: roughly 10-15 minutes of single-core decoding plus negligible model time
   (check `seconds_per_study` in the audit file; the T4 bf16 hazard above is why autocast is float16 only).
 
+## Observed on Kaggle (synthetic GPU smoke test, 2026-10-15, kernel `draculess/rsna-weak-label-smoke`, commit a83b98c)
+- Environment: 2x Tesla T4 (15,360 MiB each, capability 7.5), driver 580.178.04, Python 3.13.15, torch 2.11.0+cu128, cuDNN 9.19.
+  Training used one GPU (`cuda:0`). `torch.cuda.is_bf16_supported()` returns True on the T4 although the hardware has no bf16
+  units, so it is not a usable guard; autocast is hard-wired to float16 on CUDA.
+- The Kaggle image has no `iterative-stratification` and internet is off. The first runs failed on that import (fixed by importing it
+  lazily). Kaggle also auto-extracts uploaded zip files, so the driver accepts either the zip or the extracted tree and verifies
+  every file hash against the verified bundle.
+- Arms A and B: all checks passed (interrupt inside epoch 2 -> restored epoch 1 / step 3 -> completed; AMP float16 with scaler
+  state restored, final scale 65536; exports re-hashed identical; checkpoints load on CPU). The resumed model was bitwise equal to an
+  uninterrupted run on this hardware (informational on CUDA). Peak GPU memory 0.324 GB at the default synthetic size; throughput
+  is not representative of real DICOM decoding.
+
 ## Not verified
-Any CUDA execution (no GPU locally; the scaler path was exercised on CPU only), Kaggle I/O throughput, the exact GPU offered,
+Real-data CUDA execution and Kaggle I/O throughput (only the synthetic smoke test has run on a GPU), the exact GPU offered,
 official ImageNet weights, numerical equality with torchvision's ResNet-18 (layout and key names are tested, outputs are not), and
 the unresolved rules rows above.
