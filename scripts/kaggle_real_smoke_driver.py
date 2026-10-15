@@ -5,7 +5,7 @@ It never touches the test studies' images, never evaluates on gold labels, never
 precondition. The weak-label manifest is regenerated here from the competition's own train.csv reports (nothing
 derived is uploaded) and compared with the local reference.
 
-Environment overrides (used by the local dry run): KAGGLE_INPUT, KAGGLE_WORKING, SMOKE_STUDIES, SMOKE_DEVICE_NOTE.
+Environment overrides (used by the local dry run): KAGGLE_INPUT, KAGGLE_WORKING, BUNDLE_DIR, SMOKE_STUDIES, SMOKE_TMP, SMOKE_DEVICE_NOTE.
 """
 
 import glob
@@ -58,7 +58,7 @@ def run(cmd, name, timeout=3000):
 mounts = sorted(str(p) for p in INPUT.glob("*"))[:10]
 print("input mounts:", mounts)
 SUMMARY["input_mounts"] = mounts
-side = glob.glob(str(INPUT / "**" / "BUNDLE_FILES.json"), recursive=True)
+side = glob.glob(str(pathlib.Path(os.environ.get("BUNDLE_DIR", INPUT)) / "**" / "BUNDLE_FILES.json"), recursive=True)
 if not side:
     stop("code dataset with BUNDLE_FILES.json is not attached")
 expected = json.loads(pathlib.Path(side[0]).read_text())
@@ -178,7 +178,8 @@ def train_arm(arm: str) -> bool:
                            "files": {n: i["bytes"] for n, i in manifest_json.items() if n != "runtime"}}
         hashes_ok = hashes_ok and durable_ok
     entry["checks"] = {"finite_losses": finite, "no_skipped_samples": entry["invalid_samples"] == 0, "epoch_is_1": entry["epoch"] == 1,
-                       "full_state_present": all(entry["state_keys_present"].values()),
+                       "full_state_present": all(v for k, v in entry["state_keys_present"].items() if k != "scaler")
+                       and (entry["state_keys_present"]["scaler"] or not entry["device"].startswith("cuda")),
                        "export_integrity": hashes_ok}
     entry["passed"] = all(entry["checks"].values())
     return entry["passed"]
