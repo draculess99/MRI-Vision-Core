@@ -175,7 +175,7 @@ features.to_csv(OUT / "header_features.csv")
 SUMMARY["features"] = {"studies": int(len(features)), "failed": len(failures), "failure_kinds": sorted(set(failures.values())),
                        "columns": [c for c in features.columns], "seconds": round(time.perf_counter() - t, 1)}
 (OUT / "feature_failures.json").write_text(json.dumps(failures))
-if len(failures) > 0.02 * len(manifest.ids):
+if len(failures) > 0.02 * len(manifest.ids) and not DRY:
     stop(f"{len(failures)} studies had unreadable headers")
 save()
 usable = lambda ids: [u for u in ids if u in features.index]
