@@ -88,3 +88,12 @@ def test_spearman_by_target():
     b = a.copy()
     b[:, 0] = np.nan
     assert spearman_by_target(a, b)[0] is None
+
+
+def test_design_matrix_survives_a_single_training_row():
+    from mri_core.weak_label_confound import design_matrix
+    table = pd.DataFrame({"n_series": [3.0, 5.0], "x": [1.0, 2.0], "manufacturer": ["ge", "ge"]}, index=["a", "b"])
+    X, fit = design_matrix(table, ["a"])
+    assert np.isfinite(X).all()
+    X2, _ = design_matrix(table, ["b"], fit)
+    assert np.isfinite(X2).all()

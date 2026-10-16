@@ -117,7 +117,7 @@ def design_matrix(table: pd.DataFrame, ids: Sequence[str], fit: Optional[dict] =
         fit = {"cols": keep, "median": X[keep].median(), "mean": None, "std": None,
                "manufacturers": list(table.loc[list(ids), "manufacturer"].value_counts().index[:top_manufacturers])}
         filled = X[keep].fillna(fit["median"])
-        fit["mean"], fit["std"] = filled.mean(), filled.std().replace(0, 1.0)
+        fit["mean"], fit["std"] = filled.mean(), filled.std().fillna(1.0).replace(0, 1.0)  # a single training row has no spread
     filled = X[fit["cols"]].fillna(fit["median"])
     Z = ((filled - fit["mean"]) / fit["std"]).values
     onehot = np.stack([(table.loc[list(ids), "manufacturer"] == m).astype(float).values for m in fit["manufacturers"]], axis=1) \

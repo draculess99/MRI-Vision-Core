@@ -125,13 +125,22 @@ if not DRY and manifest.sha256 != REG["manifest_sha256"]:
     stop("manifest differs from the registered manifest")
 SUMMARY["manifest_sha256"] = manifest.sha256
 
-# the Phase 16 kernel output (attached as a kernel source) holds the exact selection, hold-out list and the recovered checkpoint
-prev = glob.glob(str(pathlib.Path(os.environ.get("P16_OUTPUT", INPUT)) / "**" / "phase16" / "warm" / "selected_studies.json"), recursive=True)
-if not prev:
-    stop("the Phase 16 kernel output (kernel source draculess/rsna-weak-label-phase16) is not attached; refusing to recompute the registered lists silently")
-P16 = pathlib.Path(prev[0]).parents[1]
-selected_ids = json.loads((P16 / "warm" / "selected_studies.json").read_text())
-holdout_ids = json.loads((P16 / "warm_holdout" / "selected_studies.json").read_text())
+# private dataset with the recovered Phase 16 seed-101 checkpoint and the registered selection / hold-out lists (copied unchanged from the
+# Phase 16 kernel output, which Kaggle will not attach as a kernel source)
+prov_files = glob.glob(str(pathlib.Path(os.environ["P16X_INPUTS"]) / "PROVENANCE.json")) if os.environ.get("P16X_INPUTS") else     glob.glob(str(INPUT / "*" / "PROVENANCE.json"))
+prov_files = [f for f in prov_files if json.loads(pathlib.Path(f).read_text()).get("kind") == "phase16x_inputs"]
+if len(prov_files) != 1:
+    stop("the private dataset draculess/rsna-weak-label-phase16x-inputs (PROVENANCE.json, kind phase16x_inputs) is not attached exactly once")
+IN = pathlib.Path(prov_files[0]).parent
+PROV = json.loads((IN / "PROVENANCE.json").read_text())
+for fname, info in PROV["files"].items():
+    if sha(IN / fname) != info["sha256"]:
+        stop(f"{fname} does not match the hash in PROVENANCE.json")
+if PROV["files"]["last.pt"]["sha256"] != PROV["files"]["last.pt"]["original_recorded_sha256_in_result_json"]:
+    stop("the checkpoint hash differs from the hash recorded when it was trained")
+selected_ids = json.loads((IN / "selected_studies.json").read_text())
+holdout_ids = json.loads((IN / "holdout_studies.json").read_text())
+SUMMARY["inputs_dataset"] = {"provenance_sha256": sha(IN / "PROVENANCE.json"), "files": {k: v["sha256"] for k, v in PROV["files"].items()}}
 pool = set(manifest.ids) - set(selected_ids)
 SUMMARY["lists"] = {"selected": len(selected_ids), "selected_sha256": sha_ids(selected_ids), "holdout": len(holdout_ids),
                     "holdout_subset_of_registered_pool": set(holdout_ids) <= pool, "pool_sha256": sha_ids(pool)}
@@ -233,10 +242,9 @@ seed_everything(SEED)
 scores[f"init_of_phase16_seed{SEED}"] = forward(build_model("C", cfg))
 SUMMARY["untrained_forward_seconds"] = round(elapsed(), 1)
 
-ckpts = glob.glob(str(P16 / "runs" / f"s{SEED}_clip1_real" / "last.pt")) if not os.environ.get("P16X_CKPT") else [os.environ["P16X_CKPT"]]
+ckpts = [str(IN / "last.pt")] if PROV["checkpoint"]["seed"] == SEED else []  # the provenance names the seed of this checkpoint
 if ckpts:
-    result_file = P16 / "runs" / f"s{SEED}_clip1_real" / "result.json"
-    recorded = json.loads(result_file.read_text())["last_pt_sha256"] if result_file.is_file() else None
+    recorded = PROV["files"]["last.pt"]["original_recorded_sha256_in_result_json"]
     digest = sha(ckpts[0])
     SUMMARY["trained_checkpoint"] = {"sha256": digest, "recorded_sha256": recorded, "verified": recorded == digest}
     if recorded is not None and recorded != digest and not DRY:
@@ -249,7 +257,7 @@ if ckpts:
     scores["trained_real"] = forward(model)
     SUMMARY["trained_checkpoint"]["sha256_after_use"] = sha(ckpts[0])
 else:
-    SUMMARY["trained_checkpoint"] = {"available": False, "note": "attach the Phase 16 kernel output (kernel source) to compare the trained model"}
+    SUMMARY["trained_checkpoint"] = {"available": False, "note": "the checkpoint in the inputs dataset belongs to a different seed than the analysed partition"}
 for name, arr in scores.items():
     assert np.isfinite(arr).all(), name
 save()

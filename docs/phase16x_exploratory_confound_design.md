@@ -54,6 +54,8 @@ new output folder; Phase 15, Phase 16 and smoke outputs, all checkpoints and the
 | **Total wall time** | **about 20-30 min (kernel limit 2,700 s), about 0.5 GPU-hours of quota** |
 Quota now 25.41 h remaining after the Phase 16 stop. Disk about 1 GB.
 
-## Requirement before launch
-The Phase 16 kernel must be attached as a kernel source (`draculess/rsna-weak-label-phase16`; its output includes the selection lists and the checkpoint). If Kaggle will not
-attach an errored kernel's output, the fallback is to upload the recovered 137 MB checkpoint (hash-verified) as a private dataset - that needs explicit approval and is not done.
+## Inputs (changed after Kaggle refused the errored Phase 16 kernel as a kernel source)
+A private dataset `draculess/rsna-weak-label-phase16x-inputs` holds only: the recovered seed-101 `last.pt` (SHA-256 `c17d4664...`, equal to the hash recorded when it was
+trained), the registered 1,200-study selection list, the 501-study hold-out list (both copied unchanged from the Phase 16 output) and `PROVENANCE.json` with file hashes.
+No images, reports, gold labels or patient data. The driver verifies every file against `PROVENANCE.json`, the checkpoint against its original recorded hash, and the lists
+against the registry (selection hash, hold-out pool hash, five validation-partition hashes) exactly as before.
