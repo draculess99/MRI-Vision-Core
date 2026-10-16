@@ -112,3 +112,34 @@ def test_cli_holdout_eval_scores_unseen_studies_and_refuses_seen_ones(world):  #
     assert report["studies"] == len(hold_ids) and report["disjoint_from_train_and_validation"] is True and set(report["prob_std"])
     with pytest.raises(SystemExit):  # studies the checkpoint trained on are refused
         cli(["holdout-eval", *common, "--checkpoint", str(world.tmp / "runh" / "last.pt"), "--include-studies", str(inc), "--output", str(out)])
+
+
+def _toy(n=16):
+    values, masks = labels(n, seed=3)
+    ds = InMemoryWeakDataset([f"s{i}" for i in range(n)], torch.rand(n, 3, 3, 1, 16, 16) * 0 + torch.linspace(0, 1, n).view(n, 1, 1, 1, 1, 1),
+                             torch.ones(n, 3, 3, dtype=torch.bool), values, masks)
+    cfg = {**CFG, "arm": "A", "epochs": 3, "image_size": 16, "slices_per_series": 3, "num_workers": 0, "batch_size": 4, "device": "cpu",
+           "val_fraction": 0.25}
+    return ds, cfg
+
+
+def test_resume_restores_model_optimizer_scheduler_rng_epoch_config_and_metrics(tmp_path):
+    ds, cfg = _toy()
+    full = train_weak_label(ds, ds, cfg, tmp_path / "full", fingerprint="f", train_ids=ds.ids, val_ids=ds.ids)
+    first = train_weak_label(ds, ds, cfg, tmp_path / "split", fingerprint="f", train_ids=ds.ids, val_ids=ds.ids, stop_after_epochs=1)
+    assert first["status"] == "paused_epoch_limit" and first["final_epoch"] == 1
+    mid = torch.load(tmp_path / "split" / "last.pt", map_location="cpu", weights_only=True)
+    for key in ("model", "optimizer", "scheduler", "config", "metrics", "epoch", "global_step", "target_columns", "train_study_ids",
+                "valid_study_ids", "dataset_fingerprint", "torch_rng", "python_rng", "numpy_rng", "loader_rng"):
+        assert mid.get(key) is not None, key
+    assert mid["scaler"] is None  # CPU run without AMP: no scaler state is expected
+    resumed = train_weak_label(ds, ds, cfg, tmp_path / "split", fingerprint="f", train_ids=ds.ids, val_ids=ds.ids)
+    assert resumed["resumed_from_epoch"] == 1 and resumed["final_epoch"] == 3
+    for a, b in zip(full["history"], resumed["history"]):  # identical losses, AUCs and diagnostics epoch by epoch
+        assert a["train_loss"] == b["train_loss"] and a["val_loss"] == b["val_loss"] and a["val_auc_weak"] == b["val_auc_weak"]
+    end_full = torch.load(tmp_path / "full" / "last.pt", map_location="cpu", weights_only=True)
+    end_split = torch.load(tmp_path / "split" / "last.pt", map_location="cpu", weights_only=True)
+    assert all(torch.equal(end_full["model"][k], end_split["model"][k]) for k in end_full["model"])
+    assert end_full["scheduler"] == end_split["scheduler"] and end_full["global_step"] == end_split["global_step"]
+    with pytest.raises(Exception):  # a changed identity key must refuse to resume
+        train_weak_label(ds, ds, {**cfg, "learning_rate": 5e-4}, tmp_path / "split", fingerprint="f", train_ids=ds.ids, val_ids=ds.ids)

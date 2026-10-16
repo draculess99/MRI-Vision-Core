@@ -104,6 +104,12 @@ def masked_bce(logits: torch.Tensor, labels: torch.Tensor, target_mask: torch.Te
     return (per_entry * weight).sum() / total
 
 
+def macro_auc(per_target: dict) -> Optional[float]:
+    """Mean over the targets whose AUC is defined; None (unavailable) when no target has both classes. Never a placeholder value."""
+    defined = [a for a in per_target.values() if a is not None]
+    return float(np.mean(defined)) if defined else None
+
+
 def masked_auc(labels: np.ndarray, probs: np.ndarray, masks: np.ndarray) -> dict:
     """Per-target ROC-AUC over trainable entries only; None when a target lacks both classes."""
     from sklearn.metrics import roc_auc_score
@@ -343,7 +349,7 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
             "val_prob_mean": {t: float(probs_all[mask_all[:, j] == 1, j].mean()) for j, t in enumerate(TARGET_COLUMNS) if (mask_all[:, j] == 1).any()},
             "val_prob_std": {t: float(probs_all[mask_all[:, j] == 1, j].std()) for j, t in enumerate(TARGET_COLUMNS) if (mask_all[:, j] == 1).any()}}
         record = {"epoch": epoch + 1, "train_loss": float(np.mean(losses)), **diagnostics, "val_loss": val_loss,
-                  "val_macro_auc_weak": float(np.mean(defined)) if defined else None,
+                  "val_macro_auc_weak": macro_auc(auc),
                   "val_auc_weak": auc, "lr": float(optimizer.param_groups[0]["lr"]), "invalid_samples": invalid, "invalid_studies": len(invalid_ids),
                   "train_images": epoch_images, "data_wait_seconds": round(data_wait, 3)}
         history.append(record)

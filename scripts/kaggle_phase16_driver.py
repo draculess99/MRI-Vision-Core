@@ -98,7 +98,7 @@ sys.path[:0] = [str(code), str(code / "scripts")]
 import torch  # noqa: E402
 from kaggle_rsna_runner import device_info, discover_data  # noqa: E402
 from mri_core.weak_label_data import load_weak_manifest  # noqa: E402
-from mri_core.weak_label_prereg import evaluate, load_registry, run_name  # noqa: E402
+from mri_core.weak_label_prereg import evaluate, final_epoch_record, load_registry, run_name  # noqa: E402
 
 REG = load_registry(code / "configs" / "phase16_registry.json")
 SUMMARY["registry_sha256"] = sha(code / "configs" / "phase16_registry.json")
@@ -187,19 +187,6 @@ for prev in glob.glob(str(pathlib.Path(_prev_root) / "phase16" / "runs" / "*")) 
     SUMMARY.setdefault("restored_from_previous_session", []).append(prev.name)
 
 
-def final_epoch_record(state):
-    hist = state["metrics"]["history"]
-    h = hist[-1]
-    auc = [v for v in h["val_auc_weak"].values() if v is not None]
-    best = min(hist, key=lambda x: x["val_loss"])
-    best_auc = [v for v in best["val_auc_weak"].values() if v is not None]
-    return {"epochs": state["epoch"], "val_final_macro_auc": sum(auc) / len(auc), "val_final_loss": h["val_loss"],
-            "val_best_epoch": best["epoch"], "val_best_loss": best["val_loss"],
-            "val_best_macro_auc": sum(best_auc) / len(best_auc), "history": [
-                {k: x.get(k) for k in ("epoch", "train_loss", "val_loss", "val_macro_auc_weak", "grad_norm_mean", "grad_clipped_fraction",
-                                       "nonfinite_grad_steps")} | {"val_prob_std": x.get("val_prob_std")} for x in hist]}
-
-
 def one_run(seed, clip, label):
     name = run_name(seed, clip, label)
     work = OUT / "runs" / name
@@ -221,6 +208,8 @@ def one_run(seed, clip, label):
                 "leakage": json.loads((work / "leakage.json").read_text()),
                 "val_floor_loss": json.loads((work / "baselines.json").read_text())["val_loss_p05"],
                 "last_pt_sha256": sha(work / "last.pt"), "last_best_sha256": sha(work / "last_best.pt")})
+    if not DRY and (rec["val_final_macro_auc"] is None):  # hundreds of validation studies: cannot happen on Kaggle; if it does, stop
+        return {**rec, "failure": "validation macro AUC undefined (no target has both classes)", "fatal": True}
     if not DRY and not rec["partition_matches_registry"]:
         return {**rec, "failure": "validation partition differs from the registered partition", "fatal": True}
     if not rec["leakage"]["clean"]:
@@ -229,10 +218,9 @@ def one_run(seed, clip, label):
                   "--exclude-studies", SELECTED, "--output", work / "holdout.json"], f"holdout_{name}").returncode != 0:
         return {**rec, "failure": "hold-out evaluation failed"}
     hold = json.loads((work / "holdout.json").read_text())
-    if hold["macro_auc"] is None:  # cannot happen with hundreds of hold-out studies; tolerated only in tiny local dry runs
-        if not DRY:
-            return {**rec, "failure": "hold-out macro AUC undefined"}
-        hold["macro_auc"] = 0.5
+    if hold["macro_auc"] is None and not DRY:
+        return {**rec, "failure": "hold-out macro AUC undefined"}
+    rec["auc_unavailable"] = rec["val_final_macro_auc"] is None or hold["macro_auc"] is None  # recorded explicitly, never filled in
     rec.update({"holdout_macro_auc": hold["macro_auc"], "holdout_per_target_auc": hold["per_target_auc"], "holdout_studies": hold["studies"],
                 "holdout_prob_std": hold["prob_std"], "holdout_class_counts": hold["class_counts"]})
     rec["kept_checkpoints"] = label == "real"
@@ -263,9 +251,11 @@ for seed in SEEDS:
                     stop(f"run {name}: {rec['failure']}")
                 continue
             failures = 0
+            if rec["auc_unavailable"]:
+                SUMMARY.setdefault("auc_unavailable_runs", []).append(name)
             SUMMARY["results"][name] = {k: rec[k] for k in ("val_final_macro_auc", "val_final_loss", "val_floor_loss", "holdout_macro_auc")}
             save()
-            if not DRY and label == "shuf" and rec["val_final_macro_auc"] >= 0.60 and rec["holdout_macro_auc"] >= 0.60:
+            if not DRY and label == "shuf" and rec["val_final_macro_auc"] is not None and rec["val_final_macro_auc"] >= 0.60 and rec["holdout_macro_auc"] >= 0.60:
                 stop(f"control alarm: shuffled run {name} scored like a real model (validation and hold-out AUC >= 0.60); investigate leakage")
     completed_blocks.append(seed)
     block_seconds = elapsed() - started
