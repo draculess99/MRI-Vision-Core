@@ -24,7 +24,7 @@ MIN_PER_CLASS = int(os.environ.get("P14_MIN_PER_CLASS", "60"))
 EPOCHS = int(os.environ.get("P14_EPOCHS", "6"))
 BUDGET = float(os.environ.get("P14_BUDGET", str(2.5 * 3600)))
 FEAS_STUDIES = int(os.environ.get("P14_FEAS", "64"))
-VARIANTS = [(128, 9), (192, 9), (128, 15), (192, 15)]
+VARIANTS = [tuple(int(x) for x in v.split("x")) for v in os.environ.get("P14_VARIANTS", "128x9,192x9,128x15,192x15").split(",")]
 INPUT = pathlib.Path(os.environ.get("KAGGLE_INPUT", "/kaggle/input"))
 WORKING = pathlib.Path(os.environ.get("KAGGLE_WORKING", "/kaggle/working"))
 OUT = WORKING / "phase14"
@@ -94,7 +94,7 @@ meta_dir, dicom_root = discover_data(INPUT)
 SUMMARY["environment"] = {**device_info(), "free_disk_gb": round(shutil.disk_usage(WORKING).free / 1e9, 1), "cpu_count": os.cpu_count()}
 if not SUMMARY["environment"]["cuda_available"] and not os.environ.get("SMOKE_DEVICE_NOTE"):
     stop("no CUDA device available")
-need_gb = N_STUDIES * 7.6e-3 + 3
+need_gb = N_STUDIES * 7.6e-3 + 3  # about 7.6 MB per study across the four variants
 if SUMMARY["environment"]["free_disk_gb"] < need_gb:
     stop(f"need about {need_gb:.0f} GB free for the cache variants, have {SUMMARY['environment']['free_disk_gb']}")
 
