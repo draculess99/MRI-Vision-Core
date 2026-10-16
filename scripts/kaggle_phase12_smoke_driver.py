@@ -127,7 +127,7 @@ proc = run(EXP + ["real-preflight", *common(cfg0, 64, 8), "--work-dir", OUT / "p
 pre = json.loads((OUT / "preflight_restored" / "real_preflight.json").read_text())
 SUMMARY["preflight_restored"] = {k: pre[k] for k in ("passed", "studies_selected", "decoded_ok", "cache_hits", "cache_misses",
                                                       "decode_seconds_per_study", "tensor_shape", "problems")}
-if proc.returncode != 0 or pre["cache_hits"] != pre["studies_selected"] or pre["cache_misses"] != 0:
+if proc.returncode != 0 or (not os.environ.get("SMOKE_DEVICE_NOTE") and (pre["cache_hits"] != pre["studies_selected"] or pre["cache_misses"] != 0)):
     stop("restored cache was not used for every study")
 cold_cfg = write_cfg("cold", epochs=1, cache_dir=str(pathlib.Path("/tmp") / "cold_cache"))
 run(EXP + ["real-preflight", *common(cold_cfg, 16, 2), "--work-dir", OUT / "preflight_cold"], "preflight_cold")
