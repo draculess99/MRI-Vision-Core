@@ -229,6 +229,10 @@ def one_run(seed, clip, label):
                   "--exclude-studies", SELECTED, "--output", work / "holdout.json"], f"holdout_{name}").returncode != 0:
         return {**rec, "failure": "hold-out evaluation failed"}
     hold = json.loads((work / "holdout.json").read_text())
+    if hold["macro_auc"] is None:  # cannot happen with hundreds of hold-out studies; tolerated only in tiny local dry runs
+        if not DRY:
+            return {**rec, "failure": "hold-out macro AUC undefined"}
+        hold["macro_auc"] = 0.5
     rec.update({"holdout_macro_auc": hold["macro_auc"], "holdout_per_target_auc": hold["per_target_auc"], "holdout_studies": hold["studies"],
                 "holdout_prob_std": hold["prob_std"], "holdout_class_counts": hold["class_counts"]})
     rec["kept_checkpoints"] = label == "real"
