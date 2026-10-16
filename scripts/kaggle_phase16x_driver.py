@@ -200,7 +200,7 @@ save()
 
 # ---- 4/5. untrained and trained forward passes on seed-101 validation + hold-out
 SUMMARY["stage"] = "forward"
-SEED = 101 if 101 in partitions else REG["seeds"][0]
+SEED = 101 if 101 in partitions else list(partitions)[0]  # (the fallback only matters in tiny local rehearsals)
 val_ids, ho_ids = usable(partitions[SEED]["val"]), usable(holdout_ids)
 union = val_ids + ho_ids
 (OUT / "union_studies.json").write_text(json.dumps(union))
