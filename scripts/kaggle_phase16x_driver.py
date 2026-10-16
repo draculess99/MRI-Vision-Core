@@ -221,7 +221,7 @@ dataset = WeakLabelDicomDataset(metadata, union, lv, lm, cfg, on_error="raise", 
 
 def forward(model):
     model.to(device)
-    _, probs = predict_probabilities(model, dataset, device, batch_size=8, num_workers=cfg["num_workers"])
+    _, probs = predict_probabilities(model, dataset, device, batch_size=8, num_workers=0 if os.name == "nt" else cfg["num_workers"])  # Windows spawn would re-run this script in every worker
     return probs[:, wc.ACTIVE_IDX]
 
 
