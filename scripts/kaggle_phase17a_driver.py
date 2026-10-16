@@ -116,10 +116,21 @@ if not SUMMARY["environment"]["cuda_available"] and not DRY:
 metadata = load_rsna_metadata(meta_dir, dicom_root)
 
 # ---- inputs package (private dataset) and frozen definitions
-prov_files = glob.glob(str(pathlib.Path(os.environ["P17_INPUTS"]) / "PROVENANCE.json")) if os.environ.get("P17_INPUTS") else glob.glob(str(INPUT / "*" / "PROVENANCE.json"))
+def _find_provenance():
+    if os.environ.get("P17_INPUTS"):
+        return glob.glob(str(pathlib.Path(os.environ["P17_INPUTS"]) / "PROVENANCE.json"))
+    found = []
+    for depth in ("*", "*/*", "*/*/*"):  # Kaggle mounts datasets at /kaggle/input/<slug>/ or a deeper owner/slug path
+        found += glob.glob(str(INPUT / depth / "PROVENANCE.json"))
+    return sorted(set(found))
+
+
+prov_files = _find_provenance()
 prov_files = [f for f in prov_files if json.loads(pathlib.Path(f).read_text()).get("kind") == "phase17a_inputs"]
 if len(prov_files) != 1:
-    stop("the private phase17a inputs dataset (PROVENANCE.json, kind phase17a_inputs) is not attached exactly once")
+    listing = {str(p.relative_to(INPUT)): sorted(x.name for x in p.iterdir())[:8] for d in ("*", "*/*") for p in list(INPUT.glob(d))[:60] if p.is_dir()}
+    SUMMARY["input_listing_for_diagnosis"] = dict(list(listing.items())[:40])  # directory names only
+    stop(f"the private phase17a inputs dataset (PROVENANCE.json, kind phase17a_inputs) was found {len(prov_files)} times, expected exactly once")
 IN = pathlib.Path(prov_files[0]).parent
 PROV = json.loads((IN / "PROVENANCE.json").read_text())
 for name, info in PROV["files"].items():
