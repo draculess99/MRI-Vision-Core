@@ -98,16 +98,35 @@ def _select(args, metadata, manifest, config):
 
 
 def cmd_train(args) -> int:
-    metadata, manifest, _ = _load(args)
+    from mri_core.weak_label_diagnostics import constant_baselines, leakage_report, shuffle_labels
+    metadata, manifest, gold = _load(args)
     config = _config(args)
     if args.epochs_override:
         config["epochs"] = args.epochs_override
     ids, values, masks, _, _ = _select(args, metadata, manifest, config)
     train_idx, val_idx = hash_split(ids, float(config["val_fraction"]), int(config["seed"]))
-    fingerprint = hashlib.sha256(f"{manifest.fingerprint()}:{studies_fingerprint(ids)}".encode()).hexdigest()
+    fingerprint_text = f"{manifest.fingerprint()}:{studies_fingerprint(ids)}"
+    train_values, train_masks = values[train_idx], masks[train_idx]
+    if args.val_equals_train:  # diagnostic only (overfit test): the validation metrics then describe fit to the training set
+        val_idx = train_idx
+        fingerprint_text += ":val_equals_train"
+    if args.shuffle_train_labels is not None:  # negative control: labels are permuted across TRAINING studies only
+        train_values, train_masks, _ = shuffle_labels(train_values, train_masks, args.shuffle_train_labels)
+        fingerprint_text += f":shuffled_train_labels:{args.shuffle_train_labels}"
+    fingerprint = hashlib.sha256(fingerprint_text.encode()).hexdigest()
+    test_ids = set(metadata.test["StudyInstanceUID"].astype(str)) | set(metadata.sample_submission["StudyInstanceUID"].astype(str))
+    leak = leakage_report([ids[i] for i in train_idx], [ids[i] for i in val_idx], gold["StudyInstanceUID"], test_ids,
+                          allow_val_equals_train=args.val_equals_train)
+    if not leak["clean"]:
+        raise SystemExit(f"leakage check failed: {leak}")
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    (args.work_dir / "leakage.json").write_text(json.dumps(leak, indent=2))
+    (args.work_dir / "baselines.json").write_text(json.dumps(constant_baselines(
+        values[train_idx], masks[train_idx], values[val_idx], masks[val_idx], float(config["max_pos_weight"])), indent=2))
 
-    def make(idx):
-        return WeakLabelDicomDataset(metadata, [ids[i] for i in idx], values[idx], masks[idx], config, on_error="skip",
+    def make(idx, labels=None):
+        v, m = (values[idx], masks[idx]) if labels is None else labels
+        return WeakLabelDicomDataset(metadata, [ids[i] for i in idx], v, m, config, on_error="skip",
                                      cache_dir=config.get("cache_dir"))
 
     (args.work_dir / "config.json").write_text(json.dumps(config, indent=2))
@@ -123,8 +142,9 @@ def cmd_train(args) -> int:
     (args.work_dir / "split_summary.json").write_text(json.dumps(
         {"included_studies": len(ids), "train_studies": len(train_idx), "validation_studies": len(val_idx),
          "train_targets": split_counts(train_idx), "validation_targets": split_counts(val_idx),
+         "shuffle_train_labels": args.shuffle_train_labels, "val_equals_train": bool(args.val_equals_train),
          "manifest_sha256": manifest.sha256, "dataset_fingerprint": fingerprint}, indent=2))
-    result = train_weak_label(make(train_idx), make(val_idx), config, args.work_dir, fingerprint=fingerprint,
+    result = train_weak_label(make(train_idx, (train_values, train_masks)), make(val_idx), config, args.work_dir, fingerprint=fingerprint,
                               train_ids=[ids[i] for i in train_idx], val_ids=[ids[i] for i in val_idx], resume=True,
                               max_seconds=args.max_seconds, export_dir=args.export_dir,
                               stop_after_epochs=args.stop_after_epochs or None)
@@ -400,6 +420,10 @@ def build_parser():
     sub.choices["train"].add_argument("--export-dir", type=Path, default=None,
                                       help="copy checkpoints here after every epoch")
     sub.choices["train"].add_argument("--epochs-override", type=int, default=0)
+    sub.choices["train"].add_argument("--shuffle-train-labels", type=int, default=None, metavar="SEED",
+                                      help="negative control: permute labels across training studies (validation labels stay true)")
+    sub.choices["train"].add_argument("--val-equals-train", action="store_true",
+                                      help="overfit diagnostic: validate on the training studies (never for model selection)")
     sub.choices["train"].add_argument("--stop-after-epochs", type=int, default=0,
                                       help="end this session cleanly after N epochs (the run can be resumed later)")
     sub.choices["verify-checkpoint"].add_argument("--checkpoint", type=Path, required=True)

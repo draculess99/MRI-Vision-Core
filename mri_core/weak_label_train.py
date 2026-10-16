@@ -273,7 +273,7 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
         if torch_device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
         model.train()
-        losses = []
+        losses, grad_norms, nonfinite_grads = [], [], 0
         data_wait, epoch_images, wait_from = 0.0, 0, time.perf_counter()
         for batch in loader:
             data_wait += time.perf_counter() - wait_from  # time the GPU loop spent waiting for decoded batches
@@ -287,17 +287,22 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
             if scaler is not None and use_amp:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), float(config["grad_clip"]))
+                norm = nn.utils.clip_grad_norm_(model.parameters(), float(config["grad_clip"]))
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), float(config["grad_clip"]))
+                norm = nn.utils.clip_grad_norm_(model.parameters(), float(config["grad_clip"]))
                 optimizer.step()
             loss_value = float(loss.detach().cpu())
             if not math.isfinite(loss_value):
                 raise TrainingAborted(f"non-finite training loss at global step {step + 1}; stopping before a bad checkpoint is written")
             losses.append(loss_value)
+            norm_value = float(norm)  # pre-clip global gradient norm (after unscaling under AMP)
+            if math.isfinite(norm_value):
+                grad_norms.append(norm_value)
+            else:
+                nonfinite_grads += 1  # AMP overflow step: the scaler skips the update
             epoch_images += int(batch["mask"][batch["valid"]].sum())
             seen += len(batch["valid"])
             bad = ~batch["valid"]
@@ -327,7 +332,17 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
         auc = masked_auc(np.vstack(v_labels), np.vstack(v_probs), np.vstack(v_masks))
         defined = [a for a in auc.values() if a is not None]
         val_loss = float(np.mean(v_losses))
-        record = {"epoch": epoch + 1, "train_loss": float(np.mean(losses)), "val_loss": val_loss,
+        probs_all = np.vstack(v_probs)
+        mask_all = np.vstack(v_masks)
+        grad_clip = float(config["grad_clip"])
+        diagnostics = {  # health indicators only; nothing here feeds back into training
+            "grad_norm_mean": float(np.mean(grad_norms)) if grad_norms else None,
+            "grad_norm_max": float(np.max(grad_norms)) if grad_norms else None,
+            "grad_clipped_fraction": float(np.mean(np.asarray(grad_norms) > grad_clip)) if grad_norms else None,
+            "nonfinite_grad_steps": nonfinite_grads,
+            "val_prob_mean": {t: float(probs_all[mask_all[:, j] == 1, j].mean()) for j, t in enumerate(TARGET_COLUMNS) if (mask_all[:, j] == 1).any()},
+            "val_prob_std": {t: float(probs_all[mask_all[:, j] == 1, j].std()) for j, t in enumerate(TARGET_COLUMNS) if (mask_all[:, j] == 1).any()}}
+        record = {"epoch": epoch + 1, "train_loss": float(np.mean(losses)), **diagnostics, "val_loss": val_loss,
                   "val_macro_auc_weak": float(np.mean(defined)) if defined else None,
                   "val_auc_weak": auc, "lr": float(optimizer.param_groups[0]["lr"]), "invalid_samples": invalid, "invalid_studies": len(invalid_ids),
                   "train_images": epoch_images, "data_wait_seconds": round(data_wait, 3)}
