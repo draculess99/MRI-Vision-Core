@@ -106,6 +106,13 @@ def cmd_train(args) -> int:
     ids, values, masks, _, _ = _select(args, metadata, manifest, config)
     train_idx, val_idx = hash_split(ids, float(config["val_fraction"]), int(config["seed"]))
     fingerprint_text = f"{manifest.fingerprint()}:{studies_fingerprint(ids)}"
+    if args.label_mask != "B0":  # Phase 17: higher-confidence candidate mask; label values stay the original ones
+        from mri_core.weak_label_mask_override import apply_override, load_override
+        override = load_override(args.label_mask_file) if args.label_mask_file else None
+        masks = apply_override(args.label_mask, ids, values, masks, manifest_sha256=manifest.sha256, override=override,
+                               expected_fingerprint=args.expected_mask_fingerprint)
+        fingerprint_text += f":label_mask:{args.label_mask}:{override['fingerprint']}"
+        config["label_mask"] = {"mode": args.label_mask, "fingerprint": override["fingerprint"]}
     train_values, train_masks = values[train_idx], masks[train_idx]
     if args.val_equals_train:  # diagnostic only (overfit test): the validation metrics then describe fit to the training set
         val_idx = train_idx
@@ -323,6 +330,41 @@ def cmd_holdout_eval(args) -> int:
     return 0
 
 
+def cmd_score_validation(args) -> int:
+    """Per-study probabilities of the checkpoint's OWN validation studies (never its training studies) for the active targets, as a CSV."""
+    import csv
+    import numpy as np
+    import torch
+    from mri_core.weak_label_models import build_model
+    from mri_core.weak_label_train import predict_probabilities
+    metadata, manifest, gold = _load(args)
+    state = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    config = {**_config(args), **{k: state["config"][k] for k in IDENTITY_KEYS if k in state["config"]}}
+    ids = list(state["valid_study_ids"])
+    test_ids = set(metadata.test["StudyInstanceUID"].astype(str)) | set(metadata.sample_submission["StudyInstanceUID"].astype(str))
+    if set(ids) & set(state["train_study_ids"]):
+        raise SystemExit("refusing: validation and training studies overlap in this checkpoint")
+    assert_no_leakage(state["train_study_ids"], ids, gold_ids=gold["StudyInstanceUID"], test_ids=test_ids)
+    index = {u: i for i, u in enumerate(manifest.ids)}
+    rows = [index[u] for u in ids]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_model(config["arm"], config)
+    model.load_state_dict(state["model"])
+    model.to(device)
+    dataset = WeakLabelDicomDataset(metadata, ids, manifest.values[rows], manifest.masks[rows], config, on_error="raise", cache_dir=config.get("cache_dir"))
+    uids, probs = predict_probabilities(model, dataset, device, num_workers=0 if sys.platform == "win32" else int(config["num_workers"]))
+    assert list(uids) == ids
+    active = [t for t in ("ACL", "Medial Meniscus", "Lateral Meniscus")]
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with open(args.output, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["study", *active])
+        for uid, row in zip(ids, probs):
+            writer.writerow([uid, *[repr(float(row[TARGET_COLUMNS.index(t)])) for t in active]])
+    print(json.dumps({"studies": len(ids), "checkpoint_sha256": sha256_file(args.checkpoint), "output": str(args.output)}))
+    return 0
+
+
 def cmd_real_preflight(args) -> int:
     """Read-only: decode the selected studies once and validate tensors, masks, latency, cache size, GPU and disk."""
     import shutil
@@ -445,7 +487,7 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("preflight", "real-preflight", "verify-checkpoint", "cache-warm", "cache-warm-multi", "common-eval", "train",
-                 "evaluate-gold", "export", "holdout-eval"):
+                 "evaluate-gold", "export", "holdout-eval", "score-validation"):
         p = sub.add_parser(name)
         p.add_argument("--input-root", type=Path, default=INPUT_ROOT)
         p.add_argument("--data-dir", type=Path, default=None)
@@ -459,12 +501,18 @@ def build_parser():
     sub.choices["train"].add_argument("--export-dir", type=Path, default=None,
                                       help="copy checkpoints here after every epoch")
     sub.choices["train"].add_argument("--epochs-override", type=int, default=0)
+    sub.choices["train"].add_argument("--label-mask", choices=("B0", "C1"), default="B0",
+                                      help="B0 = original weak-label mask (default); C1 = higher-confidence candidate mask (needs --label-mask-file)")
+    sub.choices["train"].add_argument("--label-mask-file", type=Path, default=None)
+    sub.choices["train"].add_argument("--expected-mask-fingerprint", default=None, help="refuse an override whose fingerprint differs")
     sub.choices["train"].add_argument("--shuffle-train-labels", type=int, default=None, metavar="SEED",
                                       help="negative control: permute labels across training studies (validation labels stay true)")
     sub.choices["train"].add_argument("--val-equals-train", action="store_true",
                                       help="overfit diagnostic: validate on the training studies (never for model selection)")
     sub.choices["train"].add_argument("--stop-after-epochs", type=int, default=0,
                                       help="end this session cleanly after N epochs (the run can be resumed later)")
+    sub.choices["score-validation"].add_argument("--checkpoint", type=Path, required=True)
+    sub.choices["score-validation"].add_argument("--output", type=Path, required=True)
     sub.choices["holdout-eval"].add_argument("--checkpoint", type=Path, required=True)
     sub.choices["holdout-eval"].add_argument("--output", type=Path, required=True)
     sub.choices["verify-checkpoint"].add_argument("--checkpoint", type=Path, required=True)
@@ -508,7 +556,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.command not in ("export", "smoke", "common-eval") and args.manifest is None:
         parser.error("--manifest is required")
-    handlers = {"preflight": cmd_preflight, "real-preflight": cmd_real_preflight, "verify-checkpoint": cmd_verify_checkpoint, "cache-warm": cmd_cache_warm, "cache-warm-multi": cmd_cache_warm_multi, "holdout-eval": cmd_holdout_eval, "common-eval": cmd_common_eval, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
+    handlers = {"preflight": cmd_preflight, "real-preflight": cmd_real_preflight, "verify-checkpoint": cmd_verify_checkpoint, "cache-warm": cmd_cache_warm, "cache-warm-multi": cmd_cache_warm_multi, "holdout-eval": cmd_holdout_eval, "score-validation": cmd_score_validation, "common-eval": cmd_common_eval, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
                 "smoke": cmd_smoke}
     return handlers[args.command](args)
 

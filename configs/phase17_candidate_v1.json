@@ -1,0 +1,52 @@
+{
+  "schema": "phase17-candidate-definition/1",
+  "name": "phase17_candidate_v1",
+  "frozen": true,
+  "source_manifest_sha256": "b44de7006129664de427c1a33677df9b9703f6080c652040ee710ecd63c48818",
+  "profile_manifest_sha256": {
+    "0.1.0": "b44de7006129664de427c1a33677df9b9703f6080c652040ee710ecd63c48818",
+    "0.2.0": "f7f21a54714abfe75690c66589f214f6a97d4fd9f26be6746959fa65f7e93282",
+    "0.2.2": "4d4cbc3790ed5d0ade1d09ab1e15f657ee6cafac61fdf265bd7df7117b3e0464"
+  },
+  "selection": {
+    "studies": 1200,
+    "sha256": "83a416a09fdb29fd8e43439f801dafee555310b6b34e8261131b0defe6df6100"
+  },
+  "candidate_fingerprint_sha256": "e3cc0bd9f0806fc0fad4e3bd589cabce00a40937bdc9d92efed0e50e5912b4b9",
+  "override_file": "candidate_mask_v1.json",
+  "override_file_sha256": "5e3fdfd5d19f95aa0ef6f0d7f8ecdf5e59fb25df07574f12f079289fc8a58827",
+  "override_fingerprint_sha256": "79b8655ec593d1a32b886e9f66e48d58fd57e687fec876f0c82fb9e7f1862bad",
+  "counts_per_target": {
+    "ACL": {
+      "studies": 806,
+      "positives": 132
+    },
+    "Medial Meniscus": {
+      "studies": 874,
+      "positives": 329
+    },
+    "Lateral Meniscus": {
+      "studies": 1001,
+      "positives": 151
+    }
+  },
+  "rules": [
+    "decided (positive/negative) in the original manifest and Tier-1 trainable",
+    "confidence high: positive without modifier, or negative from negated_lesion / normal_structure / normal_cartilage",
+    "evidence recorded and not shared by >= 4 targets of the study",
+    "same decided state in profiles 0.1.0, 0.2.0, 0.2.2 (studies dropped by a later profile count as unstable)"
+  ],
+  "guarantees": [
+    "original manifest and label values are never modified",
+    "the mask can only remove trainable entries",
+    "missing, uncertain and masked labels are never converted into negatives",
+    "audit code: scripts/audit_weak_label_quality.py, mri_core/weak_label_quality.py"
+  ],
+  "not_used": [
+    "Phase 16 hold-out pool",
+    "gold studies",
+    "competition test labels",
+    "model predictions or performance",
+    "leaderboard"
+  ]
+}

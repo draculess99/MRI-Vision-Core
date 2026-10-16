@@ -1,0 +1,112 @@
+{
+  "schema": "phase17a-registry/1",
+  "frozen": true,
+  "primary_target": "Medial Meniscus",
+  "secondary_targets": [
+    "ACL",
+    "Lateral Meniscus"
+  ],
+  "candidate_definition": "configs/phase17_candidate_v1.json",
+  "candidate_fingerprint_sha256": "e3cc0bd9f0806fc0fad4e3bd589cabce00a40937bdc9d92efed0e50e5912b4b9",
+  "override_fingerprint_sha256": "79b8655ec593d1a32b886e9f66e48d58fd57e687fec876f0c82fb9e7f1862bad",
+  "manifest_sha256": "b44de7006129664de427c1a33677df9b9703f6080c652040ee710ecd63c48818",
+  "training_pool": {
+    "studies": 1200,
+    "sha256": "83a416a09fdb29fd8e43439f801dafee555310b6b34e8261131b0defe6df6100"
+  },
+  "seeds": [
+    201,
+    202,
+    203,
+    204,
+    205
+  ],
+  "shuffle_seed_offset": 2000,
+  "untrained_seeds": [
+    9001,
+    9002,
+    9003,
+    9004,
+    9005,
+    9006,
+    9007,
+    9008,
+    9009,
+    9010
+  ],
+  "model": {
+    "arm": "C",
+    "image_size": 128,
+    "slices_per_series": 9,
+    "amp": true,
+    "batch_size": 8,
+    "learning_rate": 0.0001,
+    "epochs": 12,
+    "grad_clip": 1.0,
+    "weight_decay": 0.0001,
+    "warmup_epochs": 1,
+    "val_fraction": 0.2,
+    "early_stopping_patience": 0,
+    "note": "the Phase 16 recipe, carried over unchanged; no new tuning on any validation or hold-out set"
+  },
+  "arms": {
+    "B0": "C0 trained with the original weak-label mask",
+    "C1": "C0 trained with the candidate mask (same seed, split, initialisation as B0)",
+    "M0": "metadata-only logistic regression and boosted tree fitted on the same training studies (header features)",
+    "S": "C0 trained on the candidate mask with labels shuffled across training studies (paired with C1)",
+    "N": "untrained C0, seeds 9001-9010, forward pass only"
+  },
+  "partitions": {
+    "201": {
+      "train_studies": 962,
+      "validation_studies": 238,
+      "validation_sha256": "b97c2728a6b65f5f8631c5618f52c350f1560816d487d96d5f040e756045191c",
+      "max_overlap_with_earlier_validation_sets": 60
+    },
+    "202": {
+      "train_studies": 948,
+      "validation_studies": 252,
+      "validation_sha256": "3b7b072cabfc29bd2332c452272bc13b3c2e5679b7b83e631b126f76bce57441",
+      "max_overlap_with_earlier_validation_sets": 59
+    },
+    "203": {
+      "train_studies": 964,
+      "validation_studies": 236,
+      "validation_sha256": "bb05c24bfa91872e7c157b7169b241030682af0f578b7a687322a26534d56275",
+      "max_overlap_with_earlier_validation_sets": 57
+    },
+    "204": {
+      "train_studies": 967,
+      "validation_studies": 233,
+      "validation_sha256": "12e1ebecc17ce01805757c30faa3d52e6045bbd1e7d6ccc69d17c0b7484d1ba6",
+      "max_overlap_with_earlier_validation_sets": 63
+    },
+    "205": {
+      "train_studies": 958,
+      "validation_studies": 242,
+      "validation_sha256": "f437c7a46388b5b9cb84fb1948ee4bd8c23297b155e313798a6df1c9811d91fa",
+      "max_overlap_with_earlier_validation_sets": 60
+    }
+  },
+  "protected_sets": {
+    "phase16_holdout_pool": {
+      "description": "v0.1.0 manifest studies NOT in the 1,200 selection; never trained or validated on in Phases 14-15 (they appeared in the larger Phase 9-13 runs, so this is not independent data)",
+      "studies_before_series_and_readability_filters": 501,
+      "sha256": "257eb145b3961fe33d1ce948e5ccf5a17099c8cbfd2dcae6954811f52b5daedb"
+    },
+    "gold_studies": 58,
+    "kaggle_test": "excluded by the manifest and re-checked per run"
+  },
+  "evaluation_policy": {
+    "weak_label_validation": "descriptive only: the registered validation partitions scored with the manifest's own labels; never a basis for a claim",
+    "phase16_holdout": "already inspected in Phases 16 and 16X; not independent confirmation; excluded from training/validation; may be reported descriptively only",
+    "independent_evidence": "requires a human-adjudicated reference disjoint from the training pool, all validation partitions, the Phase 16 hold-out, the gold and test sets; if it does not exist, the result is reported with that limitation and no claim is made",
+    "claim_allowed_without_adjudicated_reference": false
+  },
+  "forbidden": [
+    "gold studies",
+    "leaderboard feedback",
+    "hidden test images",
+    "choice of arm, seed or epoch after seeing results"
+  ]
+}
