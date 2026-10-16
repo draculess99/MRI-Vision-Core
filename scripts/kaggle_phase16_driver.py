@@ -27,7 +27,10 @@ INPUT = pathlib.Path(os.environ.get("KAGGLE_INPUT", "/kaggle/input"))
 WORKING = pathlib.Path(os.environ.get("KAGGLE_WORKING", "/kaggle/working"))
 CACHE = pathlib.Path(os.environ.get("P16_CACHE", "/tmp/decode_cache"))
 HARD_LIMIT = float(os.environ.get("P16_HARD", "6900"))  # kernel limit is 7200 s
-DRY = bool(os.environ.get("P16_DRY"))
+DRY = bool(os.environ.get("P16_DRY"))  # CPU dry run: no GPU required
+SMOKE = bool(os.environ.get("P16_SMOKE"))  # short GPU smoke test: reduced sizes, registry equality checks relaxed, GPU required
+RELAX = DRY or SMOKE  # never true for the registered experiment
+HOLDOUT_MAX = int(os.environ.get("P16_HOLDOUT_MAX", "0"))
 OUT = WORKING / "phase16"
 OUT.mkdir(parents=True, exist_ok=True)
 SUMMARY = {"stage": "start", "stopped": None, "runs": {}, "results": {}}
@@ -103,7 +106,7 @@ from mri_core.weak_label_prereg import evaluate, final_epoch_record, load_regist
 REG = load_registry(code / "configs" / "phase16_registry.json")
 SUMMARY["registry_sha256"] = sha(code / "configs" / "phase16_registry.json")
 SEEDS = [int(x) for x in os.environ["P16_SEEDS"].split(",")] if os.environ.get("P16_SEEDS") else list(REG["seeds"])
-if DRY:
+if RELAX:
     REG = {**REG, "seeds": SEEDS}
 EPOCHS = int(os.environ.get("P16_EPOCHS", REG["epochs"]))
 N_STUDIES = int(os.environ.get("P16_STUDIES", REG["selection"]["studies"]))
@@ -123,7 +126,7 @@ if run([sys.executable, code / "scripts" / "build_weak_label_manifest.py", "--tr
 msum = json.loads(manifest.with_name(manifest.name + ".summary.json").read_text())
 SUMMARY["manifest"] = {"sha256": msum["manifest_sha256"], "included": msum["counts"]["included"],
                        "matches_local_reference": msum["manifest_sha256"] == ref["manifest_sha256"], "leakage_checks": msum["leakage_checks"]}
-if not DRY and (msum["manifest_sha256"] != REG["manifest_sha256"] or not SUMMARY["manifest"]["matches_local_reference"]):
+if not RELAX and (msum["manifest_sha256"] != REG["manifest_sha256"] or not SUMMARY["manifest"]["matches_local_reference"]):
     stop("manifest differs from the registered manifest")
 if any(msum["leakage_checks"][k] for k in ("overlap_with_gold", "overlap_with_test", "overlap_with_holdout")):
     stop("manifest failed a leakage check")
@@ -151,11 +154,11 @@ if run(EXP + ["cache-warm-multi", *COMMON, "--config", cfg_for("warm"), "--smoke
 SELECTED, EXCLUDED = OUT / "warm" / "selected_studies.json", OUT / "warm" / "excluded_unreadable.json"
 selected_ids = json.loads(SELECTED.read_text())
 SUMMARY["selected_studies"] = {"count": len(selected_ids), "sha256": sha_ids(selected_ids)}
-if not DRY and SUMMARY["selected_studies"]["sha256"] != REG["training_pool"]["sha256"]:
+if not RELAX and SUMMARY["selected_studies"]["sha256"] != REG["training_pool"]["sha256"]:
     stop("the 1,200-study selection differs from the registered one")
 pool = {u for u in load_weak_manifest(manifest).ids} - set(selected_ids)
 if run(EXP + ["cache-warm-multi", *COMMON, "--config", cfg_for("warm_holdout"), "--variants", "128x9",
-              "--exclude-studies", SELECTED, "--work-dir", OUT / "warm_holdout"], "cache_warm_holdout").returncode != 0:
+              "--exclude-studies", SELECTED, "--work-dir", OUT / "warm_holdout", *(["--max-studies", HOLDOUT_MAX] if HOLDOUT_MAX else [])], "cache_warm_holdout").returncode != 0:
     stop("hold-out cache build failed")
 HOLDOUT = OUT / "warm_holdout" / "selected_studies.json"
 holdout_ids = set(json.loads(HOLDOUT.read_text()))
@@ -164,7 +167,7 @@ SUMMARY["holdout"] = {"count": len(holdout_ids), "pool_before_filters": len(pool
                       "pool_sha256": sha_ids(pool), "registered_pool_sha256": REG["holdout_pool"]["sha256"]}
 if not SUMMARY["holdout"]["subset_of_pool"] or not SUMMARY["holdout"]["disjoint_from_selection"] or not holdout_ids:
     stop("hold-out pool is not disjoint from the training selection")
-if not DRY and SUMMARY["holdout"]["pool_sha256"] != REG["holdout_pool"]["sha256"]:
+if not RELAX and SUMMARY["holdout"]["pool_sha256"] != REG["holdout_pool"]["sha256"]:
     stop("hold-out pool differs from the registered pool")
 save()
 
@@ -202,15 +205,15 @@ def one_run(seed, clip, label):
     valid_sha = sha_ids(state["valid_study_ids"])
     registered = REG["partitions"].get(str(seed), {}).get("validation_sha256")
     rec.update({"name": name, "seed": seed, "clip": clip, "label": label, "validation_sha256": valid_sha,
-                "partition_matches_registry": valid_sha == registered if not DRY else None,
+                "partition_matches_registry": valid_sha == registered if not RELAX else None,
                 "train_studies": len(state["train_study_ids"]), "validation_studies": len(state["valid_study_ids"]),
                 "dataset_fingerprint": state["dataset_fingerprint"], "global_step": state["global_step"],
                 "leakage": json.loads((work / "leakage.json").read_text()),
                 "val_floor_loss": json.loads((work / "baselines.json").read_text())["val_loss_p05"],
                 "last_pt_sha256": sha(work / "last.pt"), "last_best_sha256": sha(work / "last_best.pt")})
-    if not DRY and (rec["val_final_macro_auc"] is None):  # hundreds of validation studies: cannot happen on Kaggle; if it does, stop
+    if not RELAX and (rec["val_final_macro_auc"] is None):  # hundreds of validation studies: cannot happen on Kaggle; if it does, stop
         return {**rec, "failure": "validation macro AUC undefined (no target has both classes)", "fatal": True}
-    if not DRY and not rec["partition_matches_registry"]:
+    if not RELAX and not rec["partition_matches_registry"]:
         return {**rec, "failure": "validation partition differs from the registered partition", "fatal": True}
     if not rec["leakage"]["clean"]:
         return {**rec, "failure": "leakage report not clean", "fatal": True}
@@ -218,7 +221,7 @@ def one_run(seed, clip, label):
                   "--exclude-studies", SELECTED, "--output", work / "holdout.json"], f"holdout_{name}").returncode != 0:
         return {**rec, "failure": "hold-out evaluation failed"}
     hold = json.loads((work / "holdout.json").read_text())
-    if hold["macro_auc"] is None and not DRY:
+    if hold["macro_auc"] is None and not RELAX:
         return {**rec, "failure": "hold-out macro AUC undefined"}
     rec["auc_unavailable"] = rec["val_final_macro_auc"] is None or hold["macro_auc"] is None  # recorded explicitly, never filled in
     rec.update({"holdout_macro_auc": hold["macro_auc"], "holdout_per_target_auc": hold["per_target_auc"], "holdout_studies": hold["studies"],
@@ -255,12 +258,35 @@ for seed in SEEDS:
                 SUMMARY.setdefault("auc_unavailable_runs", []).append(name)
             SUMMARY["results"][name] = {k: rec[k] for k in ("val_final_macro_auc", "val_final_loss", "val_floor_loss", "holdout_macro_auc")}
             save()
-            if not DRY and label == "shuf" and rec["val_final_macro_auc"] is not None and rec["val_final_macro_auc"] >= 0.60 and rec["holdout_macro_auc"] >= 0.60:
+            if not RELAX and label == "shuf" and rec["val_final_macro_auc"] is not None and rec["val_final_macro_auc"] >= 0.60 and rec["holdout_macro_auc"] >= 0.60:
                 stop(f"control alarm: shuffled run {name} scored like a real model (validation and hold-out AUC >= 0.60); investigate leakage")
     completed_blocks.append(seed)
     block_seconds = elapsed() - started
     SUMMARY.setdefault("block_seconds", {})[str(seed)] = round(block_seconds, 1)
     save()
+
+# ---- smoke only: interrupt-and-resume on the real (GPU, AMP) path must reproduce the uninterrupted run exactly
+if SMOKE:
+    SUMMARY["stage"] = "smoke_resume"
+    seed, clip = SEEDS[0], REG["grad_clip_arms"][0]
+    name = "smoke_resume"
+    work = OUT / "runs" / name
+    common = EXP + ["train", *COMMON, "--config", cfg_for(name, seed, clip), "--include-studies", SELECTED, "--exclude-studies", EXCLUDED,
+                    "--arm", "C", "--work-dir", work]
+    run(common + ["--stop-after-epochs", 1], "smoke_resume_part1")
+    mid = torch.load(work / "last.pt", map_location="cpu", weights_only=True)
+    run(common, "smoke_resume_part2")
+    end = torch.load(work / "last.pt", map_location="cpu", weights_only=True)
+    ref = torch.load(OUT / "runs" / run_name(seed, clip, "real") / "last.pt", map_location="cpu", weights_only=True)
+    h1, h2 = ref["metrics"]["history"], end["metrics"]["history"]
+    SUMMARY["smoke_resume"] = {
+        "epoch_before_resume": mid["epoch"], "epoch_after": end["epoch"], "scaler_state_present": mid.get("scaler") is not None,
+        "optimizer_state_present": mid.get("optimizer") is not None, "scheduler_state_present": mid.get("scheduler") is not None,
+        "rng_states_present": all(mid.get(k) is not None for k in ("torch_rng", "python_rng", "numpy_rng", "loader_rng")),
+        "histories_identical": [(a["train_loss"], a["val_loss"]) for a in h1] == [(a["train_loss"], a["val_loss"]) for a in h2],
+        "weights_identical": all(torch.equal(ref["model"][k], end["model"][k]) for k in ref["model"])}
+    for f in ("last.pt", "last_best.pt"):
+        (work / f).unlink(missing_ok=True)
 
 # ---- stage 2: registered verdict and hash re-verification of every kept checkpoint
 SUMMARY["stage"] = "verdict"
@@ -274,7 +300,7 @@ for name, rec in SUMMARY["runs"].items():
                 mismatch.append(f"{name}/{fname}")
 SUMMARY["checkpoint_hash_mismatches"] = mismatch
 SUMMARY["stage"] = "done"
-SUMMARY["all_passed"] = not mismatch and not SUMMARY.get("blocks_not_started") and all("failure" not in r for r in SUMMARY["runs"].values())
+SUMMARY["all_passed"] = (not mismatch) and all(SUMMARY.get("smoke_resume", {}).get(k, True) for k in ("histories_identical", "weights_identical", "scaler_state_present"))  and not SUMMARY.get("blocks_not_started") and all("failure" not in r for r in SUMMARY["runs"].values())
 save()
 print(json.dumps({"verdict": {k: v["verdict"] for k, v in SUMMARY["verdict"]["arms"].items()}, "clip_comparison": SUMMARY["verdict"]["clip_comparison"],
                   "control_alarm": SUMMARY["verdict"]["control_alarm"], "mismatch": mismatch, "wall": SUMMARY["wall_seconds"]}, indent=2, default=str))
