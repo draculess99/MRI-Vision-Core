@@ -106,6 +106,8 @@ REG = json.loads((code / "configs" / "phase17_registry.json").read_text())
 CAND = json.loads((code / "configs" / "phase17_candidate_v1.json").read_text())
 SUMMARY["registry_sha256"] = sha(code / "configs" / "phase17_registry.json")
 SEEDS = [int(x) for x in os.environ["P17_SEEDS"].split(",")] if os.environ.get("P17_SEEDS") else list(REG["seeds"])
+if len(SEEDS) > 1 and not DRY and os.environ.get("P17_ALLOW_FULL") != "1":  # the five-seed experiment must be launched deliberately
+    stop(f"{len(SEEDS)} seeds requested without P17_ALLOW_FULL=1; the full experiment needs explicit approval (one seed: P17_SEEDS=201)")
 EPOCHS = int(os.environ.get("P17_EPOCHS", REG["model"]["epochs"]))
 meta_dir, dicom_root = discover_data(INPUT)
 SUMMARY["environment"] = {**device_info(), "free_disk_gb": round(shutil.disk_usage(WORKING).free / 1e9, 1)}
