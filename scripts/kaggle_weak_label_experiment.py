@@ -157,6 +157,46 @@ def cmd_cache_warm(args) -> int:
     return 0
 
 
+def cmd_common_eval(args) -> int:
+    """Score a checkpoint on the common weak-validation yardstick shared by several manifests (never touches gold studies)."""
+    import numpy as np
+    import torch
+    from mri_core.weak_label_models import build_model
+    from mri_core.weak_label_train import predict_probabilities
+    from mri_core.weak_val_common import TIER1, common_yardstick, score_on_yardstick
+    meta_dir, dicom_root = _paths(args)
+    metadata = load_rsna_metadata(meta_dir, dicom_root)
+    gold = set(metadata.complete_label_train["StudyInstanceUID"].astype(str))
+    manifests = {}
+    for item in args.manifests:
+        name, path = item.split("=", 1)
+        manifests[name] = load_weak_manifest(Path(path))
+        assert_no_leakage(manifests[name].ids, [], gold_ids=gold)
+    state = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    config = {**_config(args), **state["config"]}
+    yard = common_yardstick(manifests, val_fraction=float(config["val_fraction"]), seed=int(config["seed"]))
+    excluded = set(json.loads(Path(args.exclude_studies).read_text())) if args.exclude_studies else set()
+    uids = [u for u in yard["ids"] if u not in excluded]
+    # a study may only be scored if it was NOT in this checkpoint's own training split
+    overlap = set(uids) & set(state["train_study_ids"])
+    if overlap:
+        raise SystemExit(f"{len(overlap)} yardstick studies were in this checkpoint's training split; refusing")
+    dataset = WeakLabelDicomDataset(metadata, uids, np.zeros((len(uids), 12), dtype=np.float32), np.zeros((len(uids), 12), dtype=np.float32),
+                                    config, on_error="raise", cache_dir=config.get("cache_dir"))
+    model = build_model(config["arm"], {**config, "pretrained_weights": None})
+    model.load_state_dict(state["model"])
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    got_uids, probs = predict_probabilities(model.to(device), dataset, device, batch_size=8, num_workers=0)
+    per_target = {t: probs[:, TARGET_COLUMNS.index(t)] for t in TIER1}
+    report = score_on_yardstick(per_target, got_uids, yard, rounds=args.rounds, seed=0)
+    report.update({"checkpoint_sha256": sha256_file(args.checkpoint), "arm": config["arm"], "epoch": int(state["epoch"]),
+                   "manifests": {n: m.sha256 for n, m in manifests.items()}, "scored_studies": len(got_uids)})
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    (args.work_dir / "common_eval.json").write_text(json.dumps(report, indent=2))
+    print(json.dumps(report, indent=2))
+    return 0
+
+
 def cmd_verify_checkpoint(args) -> int:
     """Read-only restore check: is this checkpoint compatible with the current manifest, selection and split?"""
     import torch
@@ -305,7 +345,7 @@ def cmd_smoke(args) -> int:
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("preflight", "real-preflight", "verify-checkpoint", "cache-warm", "train", "evaluate-gold", "export"):
+    for name in ("preflight", "real-preflight", "verify-checkpoint", "cache-warm", "common-eval", "train", "evaluate-gold", "export"):
         p = sub.add_parser(name)
         p.add_argument("--input-root", type=Path, default=INPUT_ROOT)
         p.add_argument("--data-dir", type=Path, default=None)
@@ -322,6 +362,10 @@ def build_parser():
     sub.choices["train"].add_argument("--stop-after-epochs", type=int, default=0,
                                       help="end this session cleanly after N epochs (the run can be resumed later)")
     sub.choices["verify-checkpoint"].add_argument("--checkpoint", type=Path, required=True)
+    sub.choices["common-eval"].add_argument("--checkpoint", type=Path, required=True)
+    sub.choices["common-eval"].add_argument("--manifests", nargs="+", required=True, metavar="NAME=PATH")
+    sub.choices["common-eval"].add_argument("--exclude-studies", type=Path, default=None)
+    sub.choices["common-eval"].add_argument("--rounds", type=int, default=1000)
     for name in ("train", "real-preflight", "verify-checkpoint", "cache-warm"):
         sub.choices[name].add_argument("--exclude-studies", type=Path, default=None,
                                        help="JSON list of study IDs to leave out (e.g. unreadable series found by cache-warm)")
@@ -352,9 +396,9 @@ def build_parser():
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.command not in ("export", "smoke") and args.manifest is None:
+    if args.command not in ("export", "smoke", "common-eval") and args.manifest is None:
         parser.error("--manifest is required")
-    handlers = {"preflight": cmd_preflight, "real-preflight": cmd_real_preflight, "verify-checkpoint": cmd_verify_checkpoint, "cache-warm": cmd_cache_warm, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
+    handlers = {"preflight": cmd_preflight, "real-preflight": cmd_real_preflight, "verify-checkpoint": cmd_verify_checkpoint, "cache-warm": cmd_cache_warm, "common-eval": cmd_common_eval, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
                 "smoke": cmd_smoke}
     return handlers[args.command](args)
 
