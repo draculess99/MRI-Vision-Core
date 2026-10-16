@@ -23,6 +23,7 @@ validated against gold labels (report_label_eval) before its output is used for 
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -33,6 +34,8 @@ from .report_labels import LabelState, ReportLabels, TargetLabel, unsupported_la
 from .rsna_knee_dataset import TARGET_COLUMNS
 
 EXTRACTOR_VERSION = "rules-en-es-0.1.0"
+EXTRACTOR_VERSION_V22 = "rules-en-es-0.2.2"  # 0.2.1 + four defects found in the Phase 13 audit sample (docs/phase13)
+EXTRACTOR_VERSION_V21 = "rules-en-es-0.2.1"  # 0.2.0 minus the weak-vs-negative promotion (see docs/phase13)
 EXTRACTOR_VERSION_V2 = "rules-en-es-0.2.0"  # opt-in: inline-heading split + weak findings subordinate to decisive ones
 WEAK_REASONS = frozenset({"weak_finding", "generic_location", "negated_weak"})
 METHOD = "rules"
@@ -235,6 +238,22 @@ SPECS: dict[str, Spec] = {
                 _c(r"\b(?:fractur\w*|microfractur\w*)\b")),
 }
 
+_DESGARRO = r"|desgarr\w*"
+
+
+def _extend_positive(pattern: re.Pattern) -> re.Pattern:
+    """Add the Spanish tear synonym ("desgarro") before the closing group of a positive-lesion pattern."""
+    return re.compile(pattern.pattern.replace(r")\b", _DESGARRO + r")\b", 1))
+
+
+SPECS_V22 = {t: (dataclasses.replace(sp, positive=_extend_positive(sp.positive)) if sp.positive is not None else sp)
+             for t, sp in SPECS.items()}
+
+# Region words: a normal statement about one part of a structure does not contradict a tear elsewhere in it
+_REGION = re.compile(r"\b(?:root|roots|body|horn|horns|junction|segment|segments|remainder|remaining|rest of|otherwise|"
+                     r"cuerno|cuernos|cuerpo|raiz|resto|restante)\b")
+_NO_INTERNAL_DERANGEMENT = re.compile(r"\bno (?:evidence of |significant )?internal derangement\b|\bsin derangement interno\b")
+
 # Osteoarthritis: three compartments share one vocabulary and are separated by the side words in the piece.
 _OA_TERM = _c(
     r"\b(?:osteoarthr\w*|osteoartr\w*|artrosis|arthrosis|osteophyt\w*|osteofit\w*|chondromalac\w*|condromalac\w*|"
@@ -292,8 +311,13 @@ def _spans(pattern: Optional[re.Pattern], piece: str) -> list[tuple[int, int]]:
     return [m.span() for m in pattern.finditer(piece)] if pattern is not None else []
 
 
-def _modify(state: LabelState, piece: str, reason: Optional[str], v2: bool = False) -> tuple[LabelState, Optional[str]]:
+def _modify(state: LabelState, piece: str, reason: Optional[str], v2: bool = False,
+            first_positive: Optional[int] = None) -> tuple[LabelState, Optional[str]]:
     """Hedging and historical context downgrade a decided state to uncertain; never the other way round."""
+    if first_positive is not None:  # 0.2.2: "bucket handle tear with R/O small cyst" -- the cue only covers what follows it
+        cue = re.search(_HEDGE_EXTRA, piece)
+        if cue and cue.start() > first_positive:
+            piece = piece[:cue.start()]
     if state in (LabelState.POSITIVE, LabelState.NEGATIVE):
         if _NOT_EXCLUDED.search(piece) or (_HEDGE_V2 if v2 else _HEDGE).search(_NOT_EXCLUDED.sub(" ", piece)):
             return LabelState.UNCERTAIN, "hedged"
@@ -311,7 +335,7 @@ def _positive_precedes_negation(piece: str, first_positive: int) -> bool:
     return bool(cues) and min(cues) > first_positive
 
 
-def _judge(piece: str, spec: Spec, v2: bool = False) -> Optional[tuple[LabelState, bool, Optional[str]]]:
+def _judge(piece: str, spec: Spec, v2: bool = False, v22: bool = False) -> Optional[tuple[LabelState, bool, Optional[str]]]:
     """Judge one piece for one target. Returns (state, specific, reason) or None when the piece says nothing."""
     specific_hits = _spans(spec.anchor, piece)
     generic_hits = _spans(spec.generic, piece) if not specific_hits else []
@@ -347,12 +371,12 @@ def _judge(piece: str, spec: Spec, v2: bool = False) -> Optional[tuple[LabelStat
         return LabelState.UNCERTAIN, specific, "not_visualized"
     if v2 and pos and _positive_precedes_negation(piece, min(a for a, _ in pos)):
         # "tear of the posterior horn ... without extrusion": the cue negates the later weak term, not the tear before it
-        state, reason = _modify(LabelState.POSITIVE, piece, None, v2)
+        state, reason = _modify(LabelState.POSITIVE, piece, None, v2, min(a for a, _ in pos) if v22 else None)
     elif lesion_spans and _negated(piece, lesion_spans, normal_ok=True, v2=v2):
         # v2: a negation that only reaches a weak term ("not all in a straight line ... injury") is itself a weak statement
         state, reason = _modify(LabelState.NEGATIVE, piece, "negated_weak" if v2 and not pos else "negated_lesion", v2)
     elif pos:
-        state, reason = _modify(LabelState.POSITIVE, piece, None, v2)
+        state, reason = _modify(LabelState.POSITIVE, piece, None, v2, min(a for a, _ in pos) if v22 else None)
     elif weak:
         state, reason = LabelState.UNCERTAIN, ("historical" if v2 and _HISTORICAL.search(piece) else "weak_finding")
     elif (_NORMAL_V2 if v2 else _NORMAL).search(piece) or re.search(r"\bno abnormal\w*", piece):
@@ -482,11 +506,16 @@ class RuleBasedExtractor:
     def __init__(self, profile: str = "0.1.0"):
         """profile "0.1.0" reproduces the original behaviour exactly (the Phase 5 manifest depends on it);
         profile "0.2.0" enables the two audited fixes and is versioned separately."""
-        if profile not in ("0.1.0", "0.2.0"):
-            raise ValueError("profile must be '0.1.0' or '0.2.0'")
+        if profile not in ("0.1.0", "0.2.0", "0.2.1", "0.2.2"):
+            raise ValueError("profile must be '0.1.0', '0.2.0', '0.2.1' or '0.2.2'")
         self.profile = profile
-        self.version = EXTRACTOR_VERSION if profile == "0.1.0" else EXTRACTOR_VERSION_V2
-        self._v2 = profile == "0.2.0"
+        self.version = {"0.1.0": EXTRACTOR_VERSION, "0.2.0": EXTRACTOR_VERSION_V2, "0.2.1": EXTRACTOR_VERSION_V21,
+                        "0.2.2": EXTRACTOR_VERSION_V22}[profile]
+        self._v2 = profile in ("0.2.0", "0.2.1", "0.2.2")
+        self._v22 = profile == "0.2.2"
+        self._specs = SPECS_V22 if self._v22 else SPECS
+        # 0.2.1: a weak finding ("degeneration without tear") may not turn into a negative; it only stops vetoing a positive
+        self._weak_may_yield_negative = profile == "0.2.0"
 
     @property
     def source_sha256(self) -> str:
@@ -513,9 +542,9 @@ class RuleBasedExtractor:
                     if not clause or not clause.strip():
                         continue
                     pieces = split_pieces(clause)
-                    judged = [{t: r for t, spec in SPECS.items() if (r := _judge(p, spec, self._v2)) is not None} for p in pieces]
+                    judged = [{t: r for t, spec in self._specs.items() if (r := _judge(p, spec, self._v2, self._v22)) is not None} for p in pieces]
                     for i, piece in enumerate(pieces):
-                        for target, spec in SPECS.items():
+                        for target, spec in self._specs.items():
                             result = judged[i].get(target)
                             if result is not None and spec.kind == "presence" and result[0] is LabelState.POSITIVE                                     and i > 0 and _is_bare_item(piece, spec) and _opens_with_negation(pieces[i - 1]):
                                 result = (LabelState.NEGATIVE, True, "list_inherited")
@@ -532,6 +561,12 @@ class RuleBasedExtractor:
                             sides_here.add("Lateral OA")
                         if _SIDE_PF.search(piece):
                             sides_here.add("PF OA")
+                if self._v22 and _NO_INTERNAL_DERANGEMENT.search(fold(sentence)):
+                    folded_sentence = fold(sentence)
+                    targets = (["Medial Meniscus", "Lateral Meniscus"] if re.search(r"menisc|menisk", folded_sentence) else []) + \
+                              (["ACL"] if re.search(r"ligament", folded_sentence) else [])
+                    for target in targets:
+                        observations.append(Observation(target, LabelState.NEGATIVE, False, section, sentence, "no_internal_derangement"))
                 previous_sides = frozenset(sides_here)
         return self._aggregate(observations, language, study_uid)
 
@@ -544,9 +579,13 @@ class RuleBasedExtractor:
             if self._v2 and any(o.state in (LabelState.POSITIVE, LabelState.NEGATIVE) for o in pool):
                 # a weak finding (degeneration, extrusion, "grade 1 injury", location-free mention) cannot veto an explicit
                 # positive or negative statement about the same target; hedges and history still can
-                decisive = [o for o in pool if o.state in (LabelState.POSITIVE, LabelState.NEGATIVE) and o.reason not in WEAK_REASONS]
+                kinds = (LabelState.POSITIVE, LabelState.NEGATIVE) if self._weak_may_yield_negative else (LabelState.POSITIVE,)
+                decisive = [o for o in pool if o.state in kinds and o.reason not in WEAK_REASONS]
                 if decisive:  # weak statements are dropped; hedged / historical uncertain observations stay and can still veto
                     pool = [o for o in pool if o.reason not in WEAK_REASONS]
+            if self._v22 and any(o.state is LabelState.POSITIVE and o.reason not in WEAK_REASONS for o in pool):
+                # "the posterior root, body and anterior horn are intact" next to an explicit tear elsewhere is region-limited
+                pool = [o for o in pool if not (o.state is LabelState.NEGATIVE and _REGION.search(fold(o.evidence)))]
             states = {o.state for o in pool}
             if not pool:
                 labels.append(TargetLabel(target, LabelState.NOT_MENTIONED, language, self.method, self.version))

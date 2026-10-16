@@ -96,3 +96,64 @@ class TestAuditedRuleFixes:
         tr = v2.extract("Diz MR incelemesinde ve bir ile yok izlenmektedir dir normal gorunumde uzerinde ön çapraz bağ yırtığı mevcuttur.")
         assert not tr.supported and all(l.state is M for l in tr.labels)
         assert {s.value for s in LabelState} == {"positive", "negative", "uncertain", "not_mentioned"}
+
+
+v21 = RuleBasedExtractor("0.2.1")
+
+
+class TestProfile021:
+    def test_versions_and_default_are_distinct(self):
+        from mri_core.report_label_rules import EXTRACTOR_VERSION_V21
+        assert v21.version == EXTRACTOR_VERSION_V21 and v21.version != v2.version and RuleBasedExtractor().profile == "0.1.0"
+
+    def test_a_weak_finding_still_cannot_veto_a_tear(self):
+        text = "Radial tear of the posterior horn of the medial meniscus.\nMild extrusion of the medial meniscal body."
+        assert state(v21, text, "Medial Meniscus") is P
+
+    def test_a_weak_finding_no_longer_flips_to_negative(self):
+        text = "Degenerative change of the medial meniscus without tear.\nMyxoid degeneration of the medial meniscus."
+        assert state(v2, text, "Medial Meniscus") is N          # 0.2.0 behaviour
+        assert state(v21, text, "Medial Meniscus") is U         # 0.2.1 keeps the cautious reading
+        assert state(v1, text, "Medial Meniscus") is U
+
+    def test_the_other_fixes_are_kept(self):
+        assert state(v21, "R/O tear of medial meniscal root.", "Medial Meniscus") is U
+        assert state(v21, "Oblique tear of the lateral meniscus posterior horn without extrusion.", "Lateral Meniscus") is P
+        assert v21.extract(TestInlineHeadings.SPANISH).state("Medial Meniscus") is P
+
+
+v22 = RuleBasedExtractor("0.2.2")
+ESF = "Hallazgos: Se realiza el estudio de la rodilla y se observa lo siguiente en el informe.\n"
+
+
+class TestProfile022:
+    def test_version_and_older_profiles_are_untouched(self):
+        from mri_core.report_label_rules import EXTRACTOR_VERSION_V22
+        assert v22.version == EXTRACTOR_VERSION_V22
+        sentence = "Medial meniscus: partial tear of the posterior root; the posterior root, body and anterior horn of the lateral meniscus are intact."
+        assert state(v21, "Tear of the lateral meniscus posterior horn.\nThe posterior root, body and anterior horn of the lateral meniscus are intact.", "Lateral Meniscus") is U
+        assert state(v22, "Tear of the lateral meniscus posterior horn.\nThe posterior root, body and anterior horn of the lateral meniscus are intact.", "Lateral Meniscus") is P
+        assert sentence
+
+    def test_spanish_desgarro_is_a_tear_term(self):
+        assert v22.extract(ESF + "Desgarro del menisco interno.").state("Medial Meniscus") is P
+        assert v22.extract(ESF + "Cambios de señal en el menisco interno sin desgarro.").state("Medial Meniscus") is N
+        assert v21.extract(ESF + "Desgarro del menisco interno.").state("Medial Meniscus") is not P
+
+    def test_rule_out_after_an_explicit_tear_does_not_hedge_the_tear(self):
+        assert state(v22, "Bucket handle tear of lateral meniscus with R/O small parameniscal cyst.", "Lateral Meniscus") is P
+        assert state(v21, "Bucket handle tear of lateral meniscus with R/O small parameniscal cyst.", "Lateral Meniscus") is U
+        assert state(v22, "R/O tear of the lateral meniscus.", "Lateral Meniscus") is U  # a cue before the tear still hedges
+
+    def test_region_limited_normal_statements_do_not_contradict_a_tear_elsewhere(self):
+        text = "Partial tear of the posterior horn of the medial meniscus.\nThe body and anterior horn of the medial meniscus are intact."
+        assert state(v22, text, "Medial Meniscus") is P
+        assert state(v22, "The medial meniscus is intact.", "Medial Meniscus") is N  # whole-structure statements are untouched
+        assert state(v22, "The body and anterior horn of the medial meniscus are intact.", "Medial Meniscus") is N  # no tear to contradict
+
+    def test_no_internal_derangement_is_a_generic_negative(self):
+        s = state(v22, "No internal derangement of the knee ligaments or menisci is identified.", "Lateral Meniscus")
+        assert s is N and state(v22, "No internal derangement of the knee ligaments or menisci is identified.", "ACL") is N
+        assert state(v21, "No internal derangement of the knee ligaments or menisci is identified.", "Lateral Meniscus") is M
+        mixed = "No internal derangement of the knee ligaments or menisci.\nComplex tear of the medial meniscus."
+        assert state(v22, mixed, "Medial Meniscus") is P  # a specific statement overrides the generic one

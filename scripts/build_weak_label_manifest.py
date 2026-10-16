@@ -32,8 +32,8 @@ def main(argv=None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--include-evidence", action="store_true", help="store evidence sentences (default: hashes only)")
-    parser.add_argument("--extractor-profile", default="0.1.0", choices=("0.1.0", "0.2.0"),
-                        help="0.1.0 reproduces the original manifest; 0.2.0 enables the audited fixes (separately versioned)")
+    parser.add_argument("--extractor-profile", default="0.1.0", choices=("0.1.0", "0.2.0", "0.2.1", "0.2.2"),
+                        help="0.1.0 reproduces the original manifest; 0.2.0/0.2.1 enable the audited fixes (separately versioned)")
     parser.add_argument("--min-decided", type=int, default=1,
                         help="minimum decided (positive/negative) ACTIVE targets a study needs to be included")
     parser.add_argument("--active-targets", default=None,
