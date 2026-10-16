@@ -76,6 +76,10 @@ def _select(args, metadata, manifest, config):
     excluded_file = getattr(args, "exclude_studies", None)
     excluded_extra = set(json.loads(Path(excluded_file).read_text())) if excluded_file else set()
     keep = [i for i, uid in enumerate(manifest.ids) if uid not in bad and uid not in excluded_extra]
+    include_file = getattr(args, "include_studies", None)
+    if include_file:  # restrict to an earlier selection (e.g. the studies whose cache variants were built)
+        allowed = set(json.loads(Path(include_file).read_text()))
+        keep = [i for i in keep if manifest.ids[i] in allowed]
     selection = None
     if getattr(args, "smoke_subset", 0):  # stratified: both classes of each Tier 1 target where feasible
         selection = select_smoke_subset([manifest.ids[i] for i in keep], manifest.values[keep], manifest.masks[keep],
@@ -125,6 +129,40 @@ def cmd_train(args) -> int:
                               max_seconds=args.max_seconds, export_dir=args.export_dir,
                               stop_after_epochs=args.stop_after_epochs or None)
     print(json.dumps({k: v for k, v in result.items() if k != "history"}, indent=2, default=float))
+    return 0
+
+
+def cmd_cache_warm_multi(args) -> int:
+    """Decode each selected study ONCE and write every requested (size x slices) cache variant; report time and size per variant."""
+    import time
+    from torch.utils.data import DataLoader
+    from mri_core.weak_label_multicache import MultiVariantWarmDataset, parse_variants
+    metadata, manifest, _ = _load(args)
+    config = _config(args)
+    variants = parse_variants(args.variants)
+    ids, _, _, selection, _ = _select(args, metadata, manifest, config)
+    cache_dir = Path(config["cache_dir"])
+    dataset = MultiVariantWarmDataset(metadata, ids, variants, config, cache_dir)
+    loader = DataLoader(dataset, batch_size=8, shuffle=False, num_workers=int(config["num_workers"]))
+    started, bad, decoded, reused = time.perf_counter(), [], 0, 0
+    for batch in loader:
+        bad.extend(u for u, ok in zip(batch["study_uid"], batch["ok"].tolist()) if not ok)
+        decoded += int(batch["decoded"].sum())
+        reused += int((~batch["decoded"]).sum())
+    seconds = time.perf_counter() - started
+    per_variant = {}
+    bad_set = set(bad)
+    for (size, slices), ds in dataset.variant_datasets.items():
+        paths = [ds._cache_path(u) for u in ids if u not in bad_set]
+        per_variant[f"{size}x{slices}"] = {"entries": sum(p.is_file() for p in paths), "bytes": sum(p.stat().st_size for p in paths if p.is_file())}
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    (args.work_dir / "selected_studies.json").write_text(json.dumps(sorted(set(ids) - bad_set)))
+    (args.work_dir / "excluded_unreadable.json").write_text(json.dumps(sorted(bad)))
+    report = {"studies": len(ids), "unreadable": len(bad), "decoded": decoded, "already_cached": reused, "seconds": round(seconds, 1),
+              "seconds_per_study": round(seconds / max(len(ids), 1), 3), "workers": int(config["num_workers"]), "variants": per_variant,
+              "class_balance": selection["class_balance"] if selection else None}
+    (args.work_dir / "cache_warm_multi.json").write_text(json.dumps(report, indent=2))
+    print(json.dumps(report, indent=2))
     return 0
 
 
@@ -347,7 +385,8 @@ def cmd_smoke(args) -> int:
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("preflight", "real-preflight", "verify-checkpoint", "cache-warm", "common-eval", "train", "evaluate-gold", "export"):
+    for name in ("preflight", "real-preflight", "verify-checkpoint", "cache-warm", "cache-warm-multi", "common-eval", "train",
+                 "evaluate-gold", "export"):
         p = sub.add_parser(name)
         p.add_argument("--input-root", type=Path, default=INPUT_ROOT)
         p.add_argument("--data-dir", type=Path, default=None)
@@ -368,10 +407,14 @@ def build_parser():
     sub.choices["common-eval"].add_argument("--manifests", nargs="+", required=True, metavar="NAME=PATH")
     sub.choices["common-eval"].add_argument("--exclude-studies", type=Path, default=None)
     sub.choices["common-eval"].add_argument("--rounds", type=int, default=1000)
-    for name in ("train", "real-preflight", "verify-checkpoint", "cache-warm"):
+    sub.choices["cache-warm-multi"].add_argument("--variants", default="128x9,192x9,128x15,192x15", help="comma-separated SIZExSLICES list")
+    for name in ("train", "real-preflight", "verify-checkpoint", "cache-warm", "cache-warm-multi"):
+        sub.choices[name].add_argument("--include-studies", type=Path, default=None,
+                                       help="JSON list of study IDs; only these (minus exclusions) are used")
+    for name in ("train", "real-preflight", "verify-checkpoint", "cache-warm", "cache-warm-multi"):
         sub.choices[name].add_argument("--exclude-studies", type=Path, default=None,
                                        help="JSON list of study IDs to leave out (e.g. unreadable series found by cache-warm)")
-    for name in ("train", "real-preflight", "verify-checkpoint", "cache-warm"):
+    for name in ("train", "real-preflight", "verify-checkpoint", "cache-warm", "cache-warm-multi"):
         sub.choices[name].add_argument("--min-per-class", type=int, default=8,
                                        help="quota of positive and negative studies per active target in the subset")
         sub.choices[name].add_argument("--smoke-subset", type=int, default=0,
@@ -400,7 +443,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.command not in ("export", "smoke", "common-eval") and args.manifest is None:
         parser.error("--manifest is required")
-    handlers = {"preflight": cmd_preflight, "real-preflight": cmd_real_preflight, "verify-checkpoint": cmd_verify_checkpoint, "cache-warm": cmd_cache_warm, "common-eval": cmd_common_eval, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
+    handlers = {"preflight": cmd_preflight, "real-preflight": cmd_real_preflight, "verify-checkpoint": cmd_verify_checkpoint, "cache-warm": cmd_cache_warm, "cache-warm-multi": cmd_cache_warm_multi, "common-eval": cmd_common_eval, "train": cmd_train, "evaluate-gold": cmd_evaluate_gold, "export": cmd_export,
                 "smoke": cmd_smoke}
     return handlers[args.command](args)
 

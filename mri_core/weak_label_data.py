@@ -138,6 +138,24 @@ class WeakLabelDicomDataset(RSNAKneeDicomDataset):
         return (tuple(images.shape) == (planes, slices, 1, size, size) and tuple(mask.shape) == (planes, slices)
                 and mask.dtype == torch.bool and bool(mask.any(dim=1).all()) and bool(torch.isfinite(images).all()))
 
+    def store_entry(self, uid: str, images: torch.Tensor, mask: torch.Tensor) -> None:
+        """Atomically write one float16 cache entry with its identity metadata (shared by decoding and bulk cache building)."""
+        path = self._cache_path(uid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(f".{os.getpid()}.tmp")  # per-process name; rename is atomic
+        torch.save({"images": images.half(), "mask": mask, "meta": self._cache_meta(uid)}, temp)
+        temp.replace(path)
+
+    def has_valid_entry(self, uid: str) -> bool:
+        path = self._cache_path(uid)
+        if path is None or not path.is_file():
+            return False
+        try:
+            blob = torch.load(path, map_location="cpu", weights_only=True)
+            return bool(blob.get("meta") == self._cache_meta(uid) and self._valid_cache_entry(blob["images"].float(), blob["mask"]))
+        except Exception:
+            return False
+
     def _decode(self, index):
         """Decode (or load from the float16 cache). The cached value is what every epoch and every arm sees, so
         results do not depend on whether a study happened to be cached already."""
@@ -155,10 +173,7 @@ class WeakLabelDicomDataset(RSNAKneeDicomDataset):
         sample = super().__getitem__(index)
         self.cache_misses += 1
         if path is not None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temp = path.with_suffix(f".{os.getpid()}.tmp")  # per-process name; rename is atomic
-            torch.save({"images": sample["images"].half(), "mask": sample["mask"], "meta": self._cache_meta(uid)}, temp)
-            temp.replace(path)
+            self.store_entry(uid, sample["images"], sample["mask"])
             sample = {"images": sample["images"].half().float(), "mask": sample["mask"], "study_uid": uid}
         return sample
 
