@@ -176,7 +176,8 @@ def cmd_common_eval(args) -> int:
     config = {**_config(args), **state["config"]}
     yard = common_yardstick(manifests, val_fraction=float(config["val_fraction"]), seed=int(config["seed"]))
     excluded = set(json.loads(Path(args.exclude_studies).read_text())) if args.exclude_studies else set()
-    uids = [u for u in yard["ids"] if u not in excluded]
+    missing = preflight_series(metadata, [u for u in yard["ids"] if u not in excluded], config["planes"])  # same filter as training
+    uids = [u for u in yard["ids"] if u not in excluded and u not in missing]
     # a study may only be scored if it was NOT in this checkpoint's own training split
     overlap = set(uids) & set(state["train_study_ids"])
     if overlap:
@@ -190,7 +191,8 @@ def cmd_common_eval(args) -> int:
     per_target = {t: probs[:, TARGET_COLUMNS.index(t)] for t in TIER1}
     report = score_on_yardstick(per_target, got_uids, yard, rounds=args.rounds, seed=0)
     report.update({"checkpoint_sha256": sha256_file(args.checkpoint), "arm": config["arm"], "epoch": int(state["epoch"]),
-                   "manifests": {n: m.sha256 for n, m in manifests.items()}, "scored_studies": len(got_uids)})
+                   "manifests": {n: m.sha256 for n, m in manifests.items()}, "scored_studies": len(got_uids),
+                   "dropped_missing_series": len(missing)})
     args.work_dir.mkdir(parents=True, exist_ok=True)
     (args.work_dir / "common_eval.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
