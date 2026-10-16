@@ -261,7 +261,8 @@ SUMMARY["stage"] = "analysis"
 features = pd.read_csv(IN / "header_features.csv", index_col=0)
 cfg = {**json.loads(cfg_for("untrained", 0).read_text()), "amp": False}
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-all_ids = [u for u in order if u not in unreadable]
+usable_set = set(json.loads((OUT / "warm" / "selected_studies.json").read_text()))  # preflighted and decoded by the cache step
+all_ids = [u for u in order if u in usable_set]
 vals_all = manifest.values[[index[u] for u in all_ids]]
 masks_all = manifest.masks[[index[u] for u in all_ids]]
 dataset = WeakLabelDicomDataset(metadata, all_ids, vals_all, masks_all, cfg, on_error="raise", cache_dir=CACHE)
