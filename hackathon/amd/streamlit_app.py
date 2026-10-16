@@ -40,6 +40,7 @@ if str(_REPO_ROOT) not in sys.path:
 import streamlit as st
 
 from hackathon.amd.agent_bridge_adapter import to_study_inference_result
+from hackathon.amd.data_config import resolve_data_paths, validate_data_paths
 from hackathon.amd.kaggle_mil_bridge import BridgeError, load_bridge_checkpoint, run_study_inference
 from hackathon.amd.llm_config import build_adapter, resolve_llm_config
 from hackathon.amd.llm_providers import LocalDeterministicAdapter, propose_with_fallback
@@ -55,14 +56,6 @@ st.set_page_config(page_title="MRI-Vision-Core — AMD bridged demo", layout="wi
 
 
 # --------------------------------------------------------------------------------- helpers
-
-
-def _default_data_root() -> str:
-    return os.environ.get("AMD_KAGGLE_RSNA_ROOT", "")
-
-
-def _default_checkpoint() -> str:
-    return os.environ.get("AMD_KAGGLE_CHECKPOINT", "")
 
 
 def _list_available_studies(data_root: Path):
@@ -115,16 +108,24 @@ st.caption(
     "no network call or API credential is required."
 )
 
+data_paths_config = resolve_data_paths()
+
 with st.sidebar:
     st.header("Data & checkpoint")
     data_root_input = st.text_input(
-        "RSNA knee data_root", value=_default_data_root(), key="data_root_input",
+        "RSNA knee data_root",
+        value=str(data_paths_config.data_root) if data_paths_config.data_root else "",
+        key="data_root_input",
         help="A real local directory with train.csv and raw/train_series/... "
-             "(set AMD_KAGGLE_RSNA_ROOT to prefill this).",
+             "Prefilled from AMD_KAGGLE_RSNA_ROOT (environment or .env); works with both "
+             "Windows paths (D:\\...) and Linux paths (/app/...). Override freely.",
     )
     checkpoint_input = st.text_input(
-        "Kaggle checkpoint (.ckpt)", value=_default_checkpoint(), key="checkpoint_input",
-        help="A foldN-knee-mil-best.ckpt file (set AMD_KAGGLE_CHECKPOINT to prefill this).",
+        "Kaggle checkpoint (.ckpt)",
+        value=str(data_paths_config.checkpoint) if data_paths_config.checkpoint else "",
+        key="checkpoint_input",
+        help="A foldN-knee-mil-best.ckpt file. Prefilled from AMD_KAGGLE_CHECKPOINT "
+             "(environment or .env). Override freely.",
     )
 
     st.header("Execution provider")
@@ -145,6 +146,14 @@ if not data_root_input or not checkpoint_input:
 
 data_root = Path(data_root_input)
 checkpoint_path = Path(checkpoint_input)
+
+# Cheap, structural checks only (existence, extension, one small metadata file's presence) --
+# never loads the dataset or the checkpoint's weights just to validate the sidebar inputs.
+path_problems = validate_data_paths(data_root, checkpoint_path)
+if path_problems:
+    for problem in path_problems:
+        st.error(problem)
+    st.stop()
 
 try:
     available_studies = _list_available_studies(data_root)

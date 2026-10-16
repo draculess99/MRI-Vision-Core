@@ -26,9 +26,16 @@ requires_real_assets = pytest.mark.skipif(
 
 
 @pytest.fixture
-def no_env(monkeypatch):
+def no_env(monkeypatch, tmp_path):
     monkeypatch.delenv("AMD_KAGGLE_RSNA_ROOT", raising=False)
     monkeypatch.delenv("AMD_KAGGLE_CHECKPOINT", raising=False)
+    # This project's own real .env (repo root) already has AMD_KAGGLE_RSNA_ROOT/CHECKPOINT
+    # set -- clearing the two env vars above isn't enough for a true "nothing configured"
+    # scenario, since resolve_data_paths() would still load them from that real file. Point
+    # the shared dotenv loader at an empty tmp_path instead, for this test only.
+    import hackathon.amd.llm_config as llm_config_module
+
+    monkeypatch.setattr(llm_config_module, "_DEFAULT_DOTENV_PATH", tmp_path / "does-not-exist.env")
 
 
 @pytest.fixture
@@ -62,6 +69,114 @@ class TestNoConfiguration:
         at.run(timeout=RUN_TIMEOUT)
         assert at.checkbox(key="amd_enabled_checkbox").value is False
         assert any("disabled by default" in c.value for c in at.caption)
+
+
+class TestDataPathPrefillAndValidation:
+    """Always runs -- these don't need real RSNA assets, only existence/extension checks."""
+
+    def test_sidebar_is_prefilled_from_environment_variables(self, monkeypatch, tmp_path):
+        root = tmp_path / "rsna-knee"
+        root.mkdir()
+        (root / "train.csv").write_text("StudyInstanceUID\n", encoding="utf-8")
+        checkpoint = tmp_path / "fold0-knee-mil-best.ckpt"
+        checkpoint.write_bytes(b"not real weights")
+
+        monkeypatch.setenv("AMD_KAGGLE_RSNA_ROOT", str(root))
+        monkeypatch.setenv("AMD_KAGGLE_CHECKPOINT", str(checkpoint))
+
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert at.text_input(key="data_root_input").value == str(root)
+        assert at.text_input(key="checkpoint_input").value == str(checkpoint)
+
+    def test_missing_environment_variables_leave_sidebar_empty(self, no_env):
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert at.text_input(key="data_root_input").value == ""
+        assert at.text_input(key="checkpoint_input").value == ""
+
+    def test_invalid_data_directory_shows_a_clean_error_without_crashing(self, monkeypatch, tmp_path):
+        missing_root = tmp_path / "does-not-exist"
+        checkpoint = tmp_path / "fold0-knee-mil-best.ckpt"
+        checkpoint.write_bytes(b"not real weights")
+
+        monkeypatch.setenv("AMD_KAGGLE_RSNA_ROOT", str(missing_root))
+        monkeypatch.setenv("AMD_KAGGLE_CHECKPOINT", str(checkpoint))
+
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert any("Data directory not found" in e.value for e in at.error)
+        assert len(at.button) == 0
+
+    def test_missing_checkpoint_shows_a_clean_error_without_crashing(self, monkeypatch, tmp_path):
+        root = tmp_path / "rsna-knee"
+        root.mkdir()
+        (root / "train.csv").write_text("StudyInstanceUID\n", encoding="utf-8")
+        missing_checkpoint = tmp_path / "does-not-exist.ckpt"
+
+        monkeypatch.setenv("AMD_KAGGLE_RSNA_ROOT", str(root))
+        monkeypatch.setenv("AMD_KAGGLE_CHECKPOINT", str(missing_checkpoint))
+
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert any("Checkpoint file not found" in e.value for e in at.error)
+        assert len(at.button) == 0
+
+    def test_wrong_checkpoint_extension_shows_a_clean_error_without_crashing(self, monkeypatch, tmp_path):
+        root = tmp_path / "rsna-knee"
+        root.mkdir()
+        (root / "train.csv").write_text("StudyInstanceUID\n", encoding="utf-8")
+        wrong_ext_checkpoint = tmp_path / "checkpoint.pt"
+        wrong_ext_checkpoint.write_bytes(b"not real weights")
+
+        monkeypatch.setenv("AMD_KAGGLE_RSNA_ROOT", str(root))
+        monkeypatch.setenv("AMD_KAGGLE_CHECKPOINT", str(wrong_ext_checkpoint))
+
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert any(".ckpt" in e.value and "extension" in e.value for e in at.error)
+        assert len(at.button) == 0
+
+    def test_missing_dataset_metadata_shows_a_clean_error_without_crashing(self, monkeypatch, tmp_path):
+        root = tmp_path / "rsna-knee"
+        root.mkdir()  # no train.csv
+        checkpoint = tmp_path / "fold0-knee-mil-best.ckpt"
+        checkpoint.write_bytes(b"not real weights")
+
+        monkeypatch.setenv("AMD_KAGGLE_RSNA_ROOT", str(root))
+        monkeypatch.setenv("AMD_KAGGLE_CHECKPOINT", str(checkpoint))
+
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert any("train.csv" in e.value for e in at.error)
+        assert len(at.button) == 0
+
+
+@requires_real_assets
+class TestManualSidebarOverride:
+    def test_manual_override_takes_precedence_over_environment_default(self, real_env, monkeypatch):
+        """Set a bogus env default, then manually type the real paths into the sidebar --
+        the app must use the typed values, not the environment default."""
+        real_data_root = os.environ["AMD_KAGGLE_RSNA_ROOT"]
+        real_checkpoint = os.environ["AMD_KAGGLE_CHECKPOINT"]
+        monkeypatch.setenv("AMD_KAGGLE_RSNA_ROOT", "this-env-default-is-intentionally-wrong")
+        monkeypatch.setenv("AMD_KAGGLE_CHECKPOINT", "this-env-default-is-intentionally-wrong.ckpt")
+
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert any("Data directory not found" in e.value for e in at.error)
+
+        at.text_input(key="data_root_input").set_value(real_data_root).run(timeout=RUN_TIMEOUT)
+        at.text_input(key="checkpoint_input").set_value(real_checkpoint).run(timeout=RUN_TIMEOUT)
+
+        assert not at.exception
+        assert not any("not found" in e.value for e in at.error)
+        assert len(at.button) > 0
 
 
 @requires_real_assets
@@ -206,12 +321,25 @@ class TestOptionalLLMSection:
         assert any("Produced by: groq" in c.value for c in at.caption)
         assert any("Deterministic workflow summary only." in m.value for m in at.markdown)
 
-    def test_amd_token_factory_never_claims_to_work_even_fully_configured(self, real_env, monkeypatch):
+    def test_amd_token_factory_falls_back_to_local_when_misconfigured(self, real_env, monkeypatch):
+        """Missing AMD_TOKENFACTORY_MODEL (one of the four required fields) must route to
+        local without any network call -- build_adapter() itself never constructs a
+        live-capable AMDTokenFactoryLLMAdapter in this case."""
+        import requests
+
+        def _blocked(*args, **kwargs):
+            raise AssertionError("requests.post was called despite AMD being misconfigured.")
+
+        monkeypatch.setattr(requests, "post", _blocked)
         monkeypatch.setenv("LLM_PROVIDER", "amd_token_factory")
         monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
         monkeypatch.setenv("AMD_TOKENFACTORY_ENABLED", "true")
-        monkeypatch.setenv("AMD_TOKENFACTORY_BASE_URL", "https://example.invalid")
+        monkeypatch.setenv("AMD_TOKENFACTORY_BASE_URL", "https://developer.amd.com.cn/radeon/api/v1")
         monkeypatch.setenv("AMD_TOKENFACTORY_API_KEY", "fake-amd-key")
+        # Explicitly blanked, not just left out of monkeypatch: the real .env on this machine
+        # already has AMD_TOKENFACTORY_MODEL set, and load_dotenv's override=False would fill
+        # it in from that file for any variable merely absent from os.environ.
+        monkeypatch.setenv("AMD_TOKENFACTORY_MODEL", "")
 
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
@@ -220,9 +348,66 @@ class TestOptionalLLMSection:
         at.button(key="llm_generate_button").click().run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
-        # Even fully "configured and enabled," it must fall back to local -- never claim success.
         assert any("Produced by: local" in c.value for c in at.caption)
-        assert any("not implemented" in c.value for c in at.caption)
+        assert any("not all set" in c.value for c in at.caption)
+
+    def test_amd_token_factory_mocked_success_requires_full_env_opt_in(self, real_env, monkeypatch):
+        import json as _json
+
+        import requests
+
+        class _FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"choices": [{"message": {
+                    "content": _json.dumps({"summary": "Mocked AMD Token Factory summary."}),
+                }}]}
+
+        monkeypatch.setenv("LLM_PROVIDER", "amd_token_factory")
+        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
+        monkeypatch.setenv("AMD_TOKENFACTORY_ENABLED", "true")
+        monkeypatch.setenv("AMD_TOKENFACTORY_BASE_URL", "https://developer.amd.com.cn/radeon/api/v1")
+        monkeypatch.setenv("AMD_TOKENFACTORY_API_KEY", "fake-amd-key")
+        monkeypatch.setenv("AMD_TOKENFACTORY_MODEL", "Qwen3.8-27B")
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse())
+
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
+        at.radio(key="llm_provider_choice").set_value("AMD Token Factory (optional)").run(timeout=RUN_TIMEOUT)
+        at.button(key="llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+
+        assert not at.exception
+        assert any("Produced by: amd_token_factory" in c.value for c in at.caption)
+        assert any("Mocked AMD Token Factory summary." in m.value for m in at.markdown)
+
+    def test_amd_token_factory_mocked_failure_falls_back_to_local_not_groq(self, real_env, monkeypatch):
+        """Even with Groq also fully configured in the environment, an AMD failure must fall
+        back to local, never silently try Groq."""
+        import requests
+
+        class _FakeErrorResponse:
+            status_code = 500
+            text = "internal error"
+
+        monkeypatch.setenv("LLM_PROVIDER", "amd_token_factory")
+        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
+        monkeypatch.setenv("AMD_TOKENFACTORY_ENABLED", "true")
+        monkeypatch.setenv("AMD_TOKENFACTORY_BASE_URL", "https://developer.amd.com.cn/radeon/api/v1")
+        monkeypatch.setenv("AMD_TOKENFACTORY_API_KEY", "fake-amd-key")
+        monkeypatch.setenv("AMD_TOKENFACTORY_MODEL", "Qwen3.8-27B")
+        monkeypatch.setenv("GROQ_API_KEY", "also-set-but-must-not-be-used")
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeErrorResponse())
+
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
+        at.radio(key="llm_provider_choice").set_value("AMD Token Factory (optional)").run(timeout=RUN_TIMEOUT)
+        at.button(key="llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+
+        assert not at.exception
+        assert any("Produced by: local (fallback:" in c.value for c in at.caption)
 
     def test_llm_section_never_changes_review_gate_state(self, real_env):
         """The LLM interpretation must be structurally separate from the human-approval gate:

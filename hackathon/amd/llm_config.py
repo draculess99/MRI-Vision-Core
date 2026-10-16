@@ -66,17 +66,21 @@ class LLMConfig:
     amd_enabled: bool
     amd_base_url: Optional[str]
     amd_api_key: Optional[str]
+    amd_model: Optional[str]
     dotenv_loaded: bool
 
     def to_dict(self) -> dict:
-        """Never includes a raw credential value -- only whether one is present."""
+        """Never includes a raw credential value -- only whether one is present. amd_base_url
+        and amd_model are not credentials, so they are shown in full (useful for diagnosing
+        "why didn't this provider activate" without ever risking an API key)."""
         return {
             "provider": self.provider,
             "allow_external_calls": self.allow_external_calls,
             "groq_api_key_present": bool(self.groq_api_key),
             "groq_model": self.groq_model,
             "amd_enabled": self.amd_enabled,
-            "amd_base_url_present": bool(self.amd_base_url),
+            "amd_base_url": self.amd_base_url,
+            "amd_model": self.amd_model,
             "amd_api_key_present": bool(self.amd_api_key),
             "dotenv_loaded": self.dotenv_loaded,
         }
@@ -101,6 +105,7 @@ def resolve_llm_config(*, use_dotenv: bool = True, dotenv_path: Optional[Path] =
         amd_enabled=_env_bool("AMD_TOKENFACTORY_ENABLED", default=False),
         amd_base_url=os.environ.get("AMD_TOKENFACTORY_BASE_URL") or None,
         amd_api_key=os.environ.get("AMD_TOKENFACTORY_API_KEY") or None,
+        amd_model=os.environ.get("AMD_TOKENFACTORY_MODEL") or None,
         dotenv_loaded=dotenv_loaded,
     )
 
@@ -129,10 +134,19 @@ def build_adapter(config: LLMConfig):
         )
 
     if config.provider == "amd_token_factory":
+        if not config.amd_enabled:
+            return LocalDeterministicAdapter(), "LLM_PROVIDER=amd_token_factory but AMD_TOKENFACTORY_ENABLED is not true; using local deterministic mode."
+        if not (config.amd_base_url and config.amd_api_key and config.amd_model):
+            return LocalDeterministicAdapter(), (
+                "LLM_PROVIDER=amd_token_factory but AMD_TOKENFACTORY_BASE_URL/_API_KEY/_MODEL are "
+                "not all set; using local deterministic mode."
+            )
         return (
-            AMDTokenFactoryLLMAdapter(enabled=config.amd_enabled, base_url=config.amd_base_url, api_key=config.amd_api_key),
-            "Using AMD Token Factory -- not implemented; this adapter's propose() always raises "
-            "NotImplementedError, so the caller's own fallback logic will produce the final result.",
+            AMDTokenFactoryLLMAdapter(
+                enabled=config.amd_enabled, base_url=config.amd_base_url,
+                api_key=config.amd_api_key, model=config.amd_model,
+            ),
+            f"Using AMD Token Factory (model={config.amd_model}).",
         )
 
     return LocalDeterministicAdapter(), "LLM_PROVIDER is 'local' (or unrecognized); using local deterministic mode."

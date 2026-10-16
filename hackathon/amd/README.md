@@ -201,21 +201,39 @@ app shows an instruction and stops; it never guesses a path or fabricates a resu
 
 ### Architecture
 
+```mermaid
+flowchart TD
+    A["mri_core.rsna_integration<br/>(study discovery, unmodified)"] --> B
+    B["hackathon.amd.kaggle_mil_bridge<br/>(checkpoint + forward pass, unmodified)"] --> C
+    C["hackathon.amd.agent_bridge_adapter<br/>(StudyInferenceResult adapter)"] --> D
+    D["mri_core.agents.orchestrator.process_inference_result<br/>(specialist / critic / consensus / review gate, unmodified)"] --> E
+    D --> G
+
+    E["hackathon.amd.review_actions<br/>(approve / request-more-evidence / escalate)"] --> F
+    F["mri_core.agents.review_gate.ReviewGate<br/>(unmodified; human approval, never bypassed)"]
+
+    G["hackathon.amd.llm_config.build_adapter()<br/>(hard gate: LLM_PROVIDER + LLM_ALLOW_EXTERNAL_CALLS=true + credentials)"] --> H
+    G -->|disabled or misconfigured| L
+
+    H{"LLM_PROVIDER"}
+    H -->|groq| I["hackathon.amd.llm_providers.GroqAdapter<br/>(live-verified once, synthetic data)"]
+    H -->|amd_token_factory| J["hackathon.amd.llm_providers.AMDTokenFactoryLLMAdapter<br/>(live-verified once, synthetic data)"]
+    H -->|local / unset| L
+
+    I --> K
+    J --> K
+    L["hackathon.amd.llm_providers.LocalDeterministicAdapter<br/>(always available, no network)"] --> K
+
+    K["mri_core.agents.llm_adapter.screen_proposal()<br/>(unmodified; BLOCKED or QUARANTINED, never 'verified')"] --> M
+    M["Streamlit UI: quarantined LLM panel<br/>(structurally separate from scores / review gate)"]
+
+    D --> N["hackathon.amd.providers<br/>(local execution, default, vs. optional AMD Token Factory execution -- NOT implemented)"]
+    D --> O["outputs/amd/benchmark_kaggle_bridge.json, if present<br/>(CPU benchmark evidence panel)"]
 ```
-mri_core.rsna_integration        (study discovery, unmodified)
-        |
-hackathon.amd.kaggle_mil_bridge  (checkpoint + forward pass, unmodified)
-        |
-hackathon.amd.agent_bridge_adapter   <- new, tested: StudyInferenceResult adapter
-        |
-mri_core.agents.orchestrator.process_inference_result   (specialist/critic/consensus/review gate, unmodified)
-        |
-hackathon.amd.review_actions     <- new, tested: approve / request-more-evidence / escalate
-        |
-hackathon.amd.streamlit_app      <- new: wires the above into a UI, plus:
-  - hackathon.amd.providers      <- new, tested: local (default) vs. optional AMD Token Factory
-  - outputs/amd/benchmark_kaggle_bridge.json, if present   (CPU benchmark evidence panel)
-```
+
+The LLM reasoning layer (G-K) is structurally separate from the review-gate path (E-F): nothing
+produced by an LLM adapter is ever read by `review_actions.py` or `ReviewGate`, and nothing in
+the review-gate path is ever sent to an LLM provider.
 
 ### Why an adapter was needed
 
@@ -298,17 +316,62 @@ it could spend its whole token budget on hidden reasoning and leave `message.con
 which the adapter correctly rejected rather than ever substituting the `reasoning` field as the
 answer. Requesting strict JSON-schema output (`{"summary": str}`) fixed this.
 
-**AMD Token Factory LLM reasoning: not implemented, never claims otherwise.**
-`AMDTokenFactoryLLMAdapter.propose()` always raises `NotImplementedError`, regardless of
-`AMD_TOKENFACTORY_ENABLED`/configuration -- there is no real Token Factory LLM client in this
-project, and no live call has ever been attempted against one.
+**AMD Token Factory LLM reasoning: implemented and verified live, exactly once, with synthetic
+data.** `AMDTokenFactoryLLMAdapter.propose()` makes a real `POST {base_url}/chat/completions`
+request -- the same shape as `GroqAdapter`, using `response_format={"type": "json_object"}`
+(not Groq's strict `json_schema`, per the verified contract), `reasoning_effort=low`, and the
+same strict `{"summary": str}` content validation (`reasoning` is never read as the answer).
+
+*Verified live connectivity (synthetic data only, one authorized call, 2026-10-16):* base URL
+`https://developer.amd.com.cn/radeon/api/v1`, model `Qwen3.8-27B`, `Authorization: Bearer
+<key>` -- returned **HTTP 200 in 4.331s**, `finish_reason: stop`, a valid JSON
+`choices[0].message.content`, and real rate-limit headers (`x-ratelimit-limit-user-rpm: 20`,
+`x-ratelimit-limit-user-daily-usd: 1` -- this account is metered at $1.00/day). The response's
+own `model` field was `self-dploy/Qwen3.8-27B`, confirming a real backend answered. As with
+Groq, this confirms *transport and schema* only, with an entirely synthetic, non-medical
+payload (`study_uid="synthetic-smoke-test-not-a-real-study"`) -- it is not a validation of
+response quality against real evidence, and every real result still only ever reaches
+`QUARANTINED` or `BLOCKED`.
+
+*A caveat worth stating plainly:* no official AMD documentation for this "Token Factory" REST
+contract was ever found during development -- the only publicly documented "Token Factory" API
+found belongs to a different company (Nebius). The live test above is the only evidence this
+specific base URL/contract is real; treat it as account-specific until corroborated elsewhere.
+
+*A second, full end-to-end live call (one authorized synthetic test, 18.14s, HTTP 200) went
+through the real `redact_for_external_llm()` → `AMDTokenFactoryLLMAdapter.propose()` →
+`screen_proposal()` path with a synthetic `StudyInferenceResult` -- confirmed no identifying
+data in the outbound payload, a valid structured `RawProposal`, and the human review gate
+(`PENDING_REVIEW`) unchanged before and after. The response came back **BLOCKED**: the model
+produced a 619-character summary, over `mri_core.agents.llm_adapter`'s own 500-character
+`MAX_PROPOSAL_LENGTH` cap -- `screen_proposal()` did exactly its job. Fix: the shared system
+prompt (`_SYSTEM_PROMPT`, used by both Groq and AMD) now explicitly asks for one sentence under
+350 characters, and `_extract_structured_summary()` enforces that same 500-character cap itself
+(imported from `mri_core.agents.llm_adapter.MAX_PROPOSAL_LENGTH`, not a separate magic number)
+-- an oversized response is now rejected with a specific `LLMProviderUnavailableError` before
+ever reaching `screen_proposal()`, rather than arriving there and coming back opaquely BLOCKED.
+`screen_proposal()` itself was not touched, loosened, or bypassed.*
+
+*Requires all four* `AMD_TOKENFACTORY_ENABLED`/`_BASE_URL`/`_API_KEY`/`_MODEL`, independently
+checked -- a partial configuration always falls back to `LocalDeterministicAdapter` via
+`build_adapter()`, before `AMDTokenFactoryLLMAdapter` is even constructed with real credentials.
+An AMD failure (bad credentials, rate limit, timeout, malformed response, etc.) never
+automatically tries Groq -- `propose_with_fallback()`'s default fallback is always
+`LocalDeterministicAdapter`, confirmed by
+`test_amd_llm_providers.py::TestAMDNeverAutoFallsBackToAnotherExternalProvider`.
+
+*Mock-tested failure handling* (no live call needed, re-run anytime): missing/partial
+credentials, HTTP 401/403 (invalid credentials), 429 (rate limit), 400/404 (possibly
+unsupported model), other HTTP errors, timeout, connection error, invalid JSON, 8 variants of
+malformed/unexpected structured-response schema, an oversized summary, and the reasoning-field
+trap -- all raise `LLMProviderUnavailableError` and fall back cleanly, never crashing the app.
 
 **No AMD GPU acceleration has been demonstrated anywhere in this adapter** -- not for the LLM
 layer (Groq's own inference hardware is irrelevant to this project's AMD claim) and not for
 model inference/benchmarking (see "Status" below). All of this remains research-prototype,
 non-diagnostic software; nothing in this section produces or implies a clinical finding.
 
-Tests: `tests/test_amd_llm_config.py` (28), `tests/test_amd_llm_providers.py` (47) -- both
+Tests: `tests/test_amd_llm_config.py` (31), `tests/test_amd_llm_providers.py` (79) -- both
 always run, fully offline/mocked.
 
 ### Dependencies
@@ -352,8 +415,14 @@ python -m pytest tests/test_amd_agent_bridge_adapter.py tests/test_amd_providers
   AMD cloud hardware yet.
 - `st.cache_resource` caches the loaded model per checkpoint path for the life of the Streamlit
   session; restart the app (not just rerun) after replacing a checkpoint file at the same path.
-- Groq connectivity has been verified live exactly once, with synthetic non-medical data only
-  (see "Optional LLM reasoning layer" above) -- this confirms the transport and schema work, not
-  the quality or safety of what Groq would say about a real study's evidence.
-- AMD Token Factory LLM reasoning has never been tested against a live endpoint and has no real
-  client; it cannot be enabled into working, only into an honest "not implemented" status.
+- Groq and AMD Token Factory LLM connectivity have each been verified live exactly once, with
+  synthetic non-medical data only (see "Optional LLM reasoning layer" above) -- this confirms
+  the transport and schema work for each, not the quality or safety of what either provider
+  would say about a real study's evidence.
+- No official AMD documentation for the Token Factory REST contract used above was ever found;
+  its legitimacy rests on the one live test succeeding, not on a published AMD API reference.
+- The AMD Token Factory *LLM reasoning* adapter (`llm_providers.AMDTokenFactoryLLMAdapter`) is
+  now implemented and live-verified; this is separate from the AMD Token Factory *execution*
+  provider (`providers.AMDTokenFactoryProvider`, for running model inference on AMD hardware),
+  which remains an unimplemented status-only seam (see above) -- the two were never the same
+  thing, and only the first one works today.

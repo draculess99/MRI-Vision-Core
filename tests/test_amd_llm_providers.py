@@ -39,7 +39,10 @@ from mri_core.agents.orchestrator import process_inference_result
 def _no_ambient_llm_credentials(monkeypatch):
     """This project's own shell has a real GROQ_API_KEY set -- never let any test in this
     file see it or any other provider credential by accident."""
-    for key in ("GROQ_API_KEY", "GROQ_MODEL", "AMD_TOKENFACTORY_BASE_URL", "AMD_TOKENFACTORY_API_KEY"):
+    for key in (
+        "GROQ_API_KEY", "GROQ_MODEL", "AMD_TOKENFACTORY_ENABLED",
+        "AMD_TOKENFACTORY_BASE_URL", "AMD_TOKENFACTORY_API_KEY", "AMD_TOKENFACTORY_MODEL",
+    ):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -368,7 +371,16 @@ class TestUnsafeClaimsAreBlockedRegardlessOfProvider:
 # --------------------------------------------------------------------- AMD Token Factory
 
 
-class TestAMDTokenFactoryLLMAdapter:
+def _amd_adapter(**overrides) -> AMDTokenFactoryLLMAdapter:
+    kwargs = dict(
+        enabled=True, base_url="https://developer.amd.com.cn/radeon/api/v1",
+        api_key="fake-amd-key", model="Qwen3.8-27B",
+    )
+    kwargs.update(overrides)
+    return AMDTokenFactoryLLMAdapter(**kwargs)
+
+
+class TestAMDTokenFactoryDisabledOrMisconfigured:
     def test_disabled_by_default(self):
         assert AMDTokenFactoryLLMAdapter().enabled is False
 
@@ -377,18 +389,271 @@ class TestAMDTokenFactoryLLMAdapter:
             status = AMDTokenFactoryLLMAdapter().status()
         assert status.available is False
 
-    def test_propose_always_raises_not_implemented_even_when_enabled_and_configured(self):
-        """Hard requirement: never claim Token Factory LLM functionality works unless an
-        actual integration has been tested. It never has been, so propose() must always fail."""
-        adapter = AMDTokenFactoryLLMAdapter(enabled=True, base_url="https://example.invalid", api_key="k")
+    def test_disabled_propose_raises_without_network_call(self):
         with _NoNetworkGuard():
-            with pytest.raises(NotImplementedError):
-                adapter.propose(*_dummy_bundle_consensus())
+            with pytest.raises(LLMProviderUnavailableError, match="not enabled"):
+                _amd_adapter(enabled=False).propose(*_dummy_bundle_consensus())
 
-    def test_status_never_claims_available_even_when_enabled_and_configured(self):
-        status = AMDTokenFactoryLLMAdapter(enabled=True, base_url="https://example.invalid", api_key="k").status()
-        assert status.available is False
-        assert "never" in status.detail or "no Token Factory LLM client" in status.detail
+    @pytest.mark.parametrize("missing_field", ["base_url", "api_key", "model"])
+    def test_enabled_but_missing_one_field_raises_without_network_call(self, missing_field):
+        with _NoNetworkGuard():
+            with pytest.raises(LLMProviderUnavailableError):
+                _amd_adapter(**{missing_field: None}).propose(*_dummy_bundle_consensus())
+
+    def test_status_reports_available_only_when_fully_configured(self):
+        assert _amd_adapter().status().available is True
+        assert _amd_adapter(model=None).status().available is False
+
+
+class TestAMDTokenFactorySuccess:
+    def test_successful_response_produces_a_proposal(self, monkeypatch):
+        wf = _workflow()
+
+        def _fake_post(*args, **kwargs):
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("AMD summary.")}}]})
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
+        assert proposal.raw_text == "AMD summary."
+        assert proposal.cited_evidence == ()
+
+    def test_request_uses_the_verified_contract(self, monkeypatch):
+        wf = _workflow()
+        captured = {}
+
+        def _fake_post(url, headers=None, json=None, timeout=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            captured["timeout"] = timeout
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("ok")}}]})
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        _amd_adapter().propose(wf.bundle, wf.consensus)
+
+        assert captured["url"] == "https://developer.amd.com.cn/radeon/api/v1/chat/completions"
+        assert captured["headers"]["Authorization"] == "Bearer fake-amd-key"
+        assert captured["json"]["model"] == "Qwen3.8-27B"
+        assert captured["json"]["response_format"] == {"type": "json_object"}
+        assert captured["json"]["reasoning_effort"] == "low"
+        assert captured["json"]["temperature"] == 0.0
+        assert captured["json"]["stream"] is False
+
+    def test_request_body_contains_only_the_redacted_payload(self, monkeypatch):
+        wf = _workflow(study_uid="1.2.3.secret", checkpoint_path="C:/secret/x.ckpt")
+        captured = {}
+
+        def _fake_post(url, headers=None, json=None, timeout=None):
+            captured["json"] = json
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("ok")}}]})
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        _amd_adapter().propose(wf.bundle, wf.consensus)
+
+        serialized_request = json.dumps(captured["json"])
+        assert "1.2.3.secret" not in serialized_request
+        assert "secret" not in serialized_request
+        assert "x.ckpt" not in serialized_request
+
+    def test_api_key_never_appears_in_any_exception_message(self, monkeypatch):
+        wf = _workflow()
+
+        def _fake_post(*args, **kwargs):
+            return _FakeResponse(status_code=401, text="unauthorized")
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        with pytest.raises(LLMProviderUnavailableError) as exc_info:
+            _amd_adapter(api_key="super-secret-amd-key-value").propose(wf.bundle, wf.consensus)
+        assert "super-secret-amd-key-value" not in str(exc_info.value)
+
+    def test_reasoning_field_is_never_read_as_the_answer(self, monkeypatch):
+        wf = _workflow()
+
+        def _fake_post(*args, **kwargs):
+            return _FakeResponse(json_body={
+                "choices": [{"message": {
+                    "reasoning": "hidden chain-of-thought, must never be used",
+                    "content": _structured_content("the real reviewed summary"),
+                }}]
+            })
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
+        assert proposal.raw_text == "the real reviewed summary"
+        assert "chain-of-thought" not in proposal.raw_text
+
+
+class TestAMDTokenFactoryFailureModes:
+    def test_timeout(self, monkeypatch):
+        wf = _workflow()
+
+        def _fake_post(*args, **kwargs):
+            raise requests.Timeout("simulated timeout")
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        with pytest.raises(LLMProviderUnavailableError, match="timed out"):
+            _amd_adapter().propose(wf.bundle, wf.consensus)
+
+    def test_connection_error(self, monkeypatch):
+        wf = _workflow()
+
+        def _fake_post(*args, **kwargs):
+            raise requests.ConnectionError("simulated connection error")
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        with pytest.raises(LLMProviderUnavailableError):
+            _amd_adapter().propose(wf.bundle, wf.consensus)
+
+    def test_invalid_credentials_401(self, monkeypatch):
+        wf = _workflow()
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(status_code=401, text="unauthorized"))
+        with pytest.raises(LLMProviderUnavailableError, match="401"):
+            _amd_adapter().propose(wf.bundle, wf.consensus)
+
+    def test_invalid_credentials_403(self, monkeypatch):
+        wf = _workflow()
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(status_code=403, text="forbidden"))
+        with pytest.raises(LLMProviderUnavailableError, match="403"):
+            _amd_adapter().propose(wf.bundle, wf.consensus)
+
+    def test_rate_limit_429(self, monkeypatch):
+        wf = _workflow()
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(status_code=429, text="rate limited"))
+        with pytest.raises(LLMProviderUnavailableError, match="429"):
+            _amd_adapter().propose(wf.bundle, wf.consensus)
+
+    def test_unsupported_model_400(self, monkeypatch):
+        wf = _workflow()
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(status_code=400, text="bad request"))
+        with pytest.raises(LLMProviderUnavailableError, match="400"):
+            _amd_adapter().propose(wf.bundle, wf.consensus)
+
+    def test_unsupported_model_404(self, monkeypatch):
+        wf = _workflow()
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(status_code=404, text="not found"))
+        with pytest.raises(LLMProviderUnavailableError, match="404"):
+            _amd_adapter().propose(wf.bundle, wf.consensus)
+
+    def test_other_http_error(self, monkeypatch):
+        wf = _workflow()
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(status_code=503, text="unavailable"))
+        with pytest.raises(LLMProviderUnavailableError, match="503"):
+            _amd_adapter().propose(wf.bundle, wf.consensus)
+
+    def test_invalid_json(self, monkeypatch):
+        wf = _workflow()
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(json_body=ValueError("not json")))
+        with pytest.raises(LLMProviderUnavailableError, match="JSON"):
+            _amd_adapter().propose(wf.bundle, wf.consensus)
+
+    @pytest.mark.parametrize(
+        "bad_body",
+        [
+            {},
+            {"choices": []},
+            {"choices": [{"message": {}}]},
+            {"choices": [{"message": {"content": ""}}]},
+            {"choices": [{"message": {"content": "not valid json at all"}}]},
+            {"choices": [{"message": {"content": '{"not_summary": "x"}'}}]},
+            {"choices": [{"message": {"content": '{"summary": 123}'}}]},
+            {"choices": [{"message": {"content": '{"summary": "x", "extra": "y"}'}}]},
+        ],
+    )
+    def test_malformed_or_unexpected_schema_is_rejected(self, monkeypatch, bad_body):
+        wf = _workflow()
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(json_body=bad_body))
+        with pytest.raises(LLMProviderUnavailableError):
+            _amd_adapter().propose(wf.bundle, wf.consensus)
+
+    def test_oversized_summary_is_rejected(self, monkeypatch):
+        wf = _workflow()
+        oversized = _structured_content("x" * 3000)
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": oversized}}]}))
+        with pytest.raises(LLMProviderUnavailableError, match="exceeds max length"):
+            _amd_adapter().propose(wf.bundle, wf.consensus)
+
+    def test_the_real_619_character_response_that_was_once_blocked_is_now_rejected_earlier(self, monkeypatch):
+        """Regression test for a real live-call failure: AMD Token Factory once returned a
+        619-character summary that reached screen_proposal() and came back opaquely BLOCKED
+        (length). This adapter must now reject it itself, before screen_proposal() ever sees
+        it, with a specific, diagnosable error -- same 500-char threshold, not a looser one."""
+        wf = _workflow()
+        real_failure_text = (
+            "The workflow is marked MORE_EVIDENCE_REQUIRED, and the single research model produced "
+            "uncalibrated scores that are numerically higher for the osteoarthritis, effusion, and "
+            "synovitis categories than for the ligament and meniscus categories, though none of these "
+            "values should be interpreted as a finding or a probability of an abnormality being present. "
+            "The quality gate has not yet been assessed for this study, which is one of the stated "
+            "limitations, and no ensemble of models was used to produce this single result, so the "
+            "overall evidence remains incomplete pending further structured review by a qualified reviewer."
+        )
+        assert len(real_failure_text) > 500  # matches the real observed length (619 chars)
+        monkeypatch.setattr(
+            requests, "post",
+            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content(real_failure_text)}}]}),
+        )
+        with pytest.raises(LLMProviderUnavailableError, match="exceeds max length 500"):
+            _amd_adapter().propose(wf.bundle, wf.consensus)
+
+    def test_summary_at_exactly_the_shared_cap_is_accepted(self, monkeypatch):
+        """The adapter-level cap must match, not undercut, mri_core's own MAX_PROPOSAL_LENGTH --
+        a summary of exactly that length must still pass through to screen_proposal()."""
+        from mri_core.agents.llm_adapter import MAX_PROPOSAL_LENGTH
+
+        wf = _workflow()
+        exactly_at_cap = "x" * MAX_PROPOSAL_LENGTH
+        monkeypatch.setattr(
+            requests, "post",
+            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content(exactly_at_cap)}}]}),
+        )
+        proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
+        assert proposal.raw_text == exactly_at_cap
+        outcome = screen_proposal(proposal, wf.bundle)
+        assert outcome.status == ProposalStatus.QUARANTINED
+
+    def test_short_valid_summary_is_quarantined_not_approved(self, monkeypatch):
+        """A short, safe, well-formed summary must still only ever reach QUARANTINED --
+        never auto-approved into verified evidence, regardless of how clean it looks."""
+        wf = _workflow()
+        monkeypatch.setattr(
+            requests, "post",
+            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("Workflow data summary only.")}}]}),
+        )
+        proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
+        outcome = screen_proposal(proposal, wf.bundle)
+        assert outcome.status == ProposalStatus.QUARANTINED
+        assert "never published as verified evidence" in outcome.reason
+
+
+class TestAMDTokenFactoryUnsafeClaimsAreBlocked:
+    @pytest.mark.parametrize(
+        "unsafe_text",
+        [
+            "This study shows a confirmed diagnosis of ACL tear.",
+            "Approved by clinician on review.",
+        ],
+    )
+    def test_unsafe_text_is_blocked(self, monkeypatch, unsafe_text):
+        wf = _workflow()
+        monkeypatch.setattr(
+            requests, "post",
+            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content(unsafe_text)}}]}),
+        )
+        proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
+        outcome = screen_proposal(proposal, wf.bundle)
+        assert outcome.status == ProposalStatus.BLOCKED
+
+
+class TestAMDNeverAutoFallsBackToAnotherExternalProvider:
+    def test_default_fallback_is_local_not_groq(self, monkeypatch):
+        """Hard requirement: a failed AMD call must never automatically try Groq (or any
+        other external provider) -- only the local deterministic fallback."""
+        wf = _workflow()
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(status_code=500, text="error"))
+
+        proposal, used = propose_with_fallback(_amd_adapter(), wf.bundle, wf.consensus)
+        assert used.startswith("local (fallback:")
+        assert isinstance(proposal, RawProposal)
 
 
 def _dummy_bundle_consensus():

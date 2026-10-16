@@ -20,6 +20,7 @@ from hackathon.amd.llm_providers import AMDTokenFactoryLLMAdapter, GroqAdapter, 
 _ALL_LLM_ENV_VARS = (
     "LLM_PROVIDER", "LLM_ALLOW_EXTERNAL_CALLS", "GROQ_API_KEY", "GROQ_MODEL",
     "AMD_TOKENFACTORY_ENABLED", "AMD_TOKENFACTORY_BASE_URL", "AMD_TOKENFACTORY_API_KEY",
+    "AMD_TOKENFACTORY_MODEL",
 )
 
 
@@ -139,18 +140,59 @@ class TestProviderAndModelSelection:
         assert isinstance(adapter, GroqAdapter)
         assert adapter.model == "some-other-model-name"
 
-    def test_amd_token_factory_selected_and_enabled_still_never_claims_to_work(self, monkeypatch):
+    def test_amd_token_factory_selected_and_enabled_builds_a_real_adapter(self, monkeypatch):
+        """AMDTokenFactoryLLMAdapter now makes real calls (see test_amd_llm_providers.py for
+        full mocked coverage of propose()). This test only checks build_adapter()'s own
+        routing: all four of enabled/base_url/api_key/model must be present, or it falls back
+        to local -- it never makes a network call itself."""
+        monkeypatch.setenv("LLM_PROVIDER", "amd_token_factory")
+        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
+        monkeypatch.setenv("AMD_TOKENFACTORY_ENABLED", "true")
+        monkeypatch.setenv("AMD_TOKENFACTORY_BASE_URL", "https://example.invalid")
+        monkeypatch.setenv("AMD_TOKENFACTORY_API_KEY", "fake-amd-key")
+        monkeypatch.setenv("AMD_TOKENFACTORY_MODEL", "some-model-name")
+        config = resolve_llm_config(use_dotenv=False)
+        adapter, reason = build_adapter(config)
+        assert isinstance(adapter, AMDTokenFactoryLLMAdapter)
+        assert "Using AMD Token Factory" in reason
+
+    def test_amd_token_factory_falls_back_to_local_when_model_is_missing(self, monkeypatch):
+        """Even with everything else configured, a missing AMD_TOKENFACTORY_MODEL must still
+        route to local -- build_adapter() requires all four AMD fields, not just enabled."""
         monkeypatch.setenv("LLM_PROVIDER", "amd_token_factory")
         monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
         monkeypatch.setenv("AMD_TOKENFACTORY_ENABLED", "true")
         monkeypatch.setenv("AMD_TOKENFACTORY_BASE_URL", "https://example.invalid")
         monkeypatch.setenv("AMD_TOKENFACTORY_API_KEY", "fake-amd-key")
         config = resolve_llm_config(use_dotenv=False)
+        assert config.amd_model is None
         adapter, reason = build_adapter(config)
-        assert isinstance(adapter, AMDTokenFactoryLLMAdapter)
-        assert "not implemented" in reason
-        with pytest.raises(NotImplementedError):
-            adapter.propose(None, None)
+        assert isinstance(adapter, LocalDeterministicAdapter)
+        assert "not all set" in reason
+
+    def test_amd_token_factory_model_is_loaded_and_surfaced(self, monkeypatch):
+        """AMD_TOKENFACTORY_MODEL must be read into the resolved config (it was previously
+        silently ignored) and threaded into the adapter."""
+        monkeypatch.setenv("LLM_PROVIDER", "amd_token_factory")
+        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
+        monkeypatch.setenv("AMD_TOKENFACTORY_ENABLED", "true")
+        monkeypatch.setenv("AMD_TOKENFACTORY_BASE_URL", "https://example.invalid")
+        monkeypatch.setenv("AMD_TOKENFACTORY_API_KEY", "fake-amd-key")
+        monkeypatch.setenv("AMD_TOKENFACTORY_MODEL", "some-model-name")
+
+        config = resolve_llm_config(use_dotenv=False)
+        assert config.amd_model == "some-model-name"
+        assert config.to_dict()["amd_model"] == "some-model-name"
+
+        adapter, _reason = build_adapter(config)
+        assert adapter.model == "some-model-name"
+        assert "some-model-name" in adapter.status().detail
+
+    def test_amd_token_factory_model_unset_is_none_not_a_crash(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "amd_token_factory")
+        config = resolve_llm_config(use_dotenv=False)
+        assert config.amd_model is None
+        assert config.to_dict()["amd_model"] is None
 
 
 # -------------------------------------------------------------------- invalid-model fallback
