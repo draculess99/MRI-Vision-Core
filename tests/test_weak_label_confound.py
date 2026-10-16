@@ -97,3 +97,9 @@ def test_design_matrix_survives_a_single_training_row():
     assert np.isfinite(X).all()
     X2, _ = design_matrix(table, ["b"], fit)
     assert np.isfinite(X2).all()
+
+
+def test_empty_evaluation_set_is_skipped_not_fatal():
+    ids, table, values, masks = make_table(60)
+    out = fit_predict_baselines(table, ids[:50], values[:50], masks[:50], {"val": ids[50:], "empty": []})
+    assert out["logreg"]["empty"].shape == (0, 3) and out["logreg"]["val"].shape == (10, 3)

@@ -131,7 +131,7 @@ def fit_predict_baselines(table, train_ids, train_values, train_masks, eval_sets
     from sklearn.ensemble import HistGradientBoostingClassifier
     from sklearn.linear_model import LogisticRegression
     Xtr, fit = design_matrix(table, train_ids)
-    designs = {name: design_matrix(table, ids, fit)[0] for name, ids in eval_sets.items()}
+    designs = {name: design_matrix(table, ids, fit)[0] for name, ids in eval_sets.items() if len(ids)}
     out = {"logreg": {n: np.full((len(ids), len(ACTIVE)), np.nan) for n, ids in eval_sets.items()},
            "boosted": {n: np.full((len(ids), len(ACTIVE)), np.nan) for n, ids in eval_sets.items()}}
     for k, j in enumerate(ACTIVE_IDX):
@@ -143,6 +143,8 @@ def fit_predict_baselines(table, train_ids, train_values, train_masks, eval_sets
         gb = HistGradientBoostingClassifier(max_depth=3, max_iter=100, learning_rate=0.05, random_state=0).fit(
             table.loc[list(train_ids)].drop(columns=["manufacturer"]).astype(float).values[use], y)
         for name, ids in eval_sets.items():
+            if len(ids) == 0:  # nothing to score (only possible in tiny rehearsal sets)
+                continue
             out["logreg"][name][:, k] = lr.predict_proba(designs[name])[:, 1]
             out["boosted"][name][:, k] = gb.predict_proba(
                 table.loc[list(ids)].drop(columns=["manufacturer"]).astype(float).values)[:, 1]
