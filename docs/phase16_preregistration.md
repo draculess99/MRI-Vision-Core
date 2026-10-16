@@ -74,3 +74,17 @@ and `holdout-eval` (including refusal of studies the checkpoint trained on); a C
 5. Run time could exceed the estimate (Kaggle T4 variation); blocks are skipped rather than truncated, giving `incomplete`.
 6. Disk or output-size surprises (about 2.8 GB expected); downloads need `--page-size 200`.
 7. A positive result is agreement with automated labels, never clinical accuracy, and would not justify replacing the deployed inference weights.
+
+## Kaggle preparation (added before launch)
+- **Bundle**: built from commit `d2fa2b3` (every file hash-verified in the kernel): includes the undefined-AUC handling
+  (`final_epoch_record`, `macro_auc`, None-safe verdict), the registry, the hold-out evaluator and all model/data/checkpoint modules.
+- **Undefined AUC** is recorded as unavailable (`None`, flagged in `auc_unavailable_runs`); never replaced by 0.5 or 0.0. On Kaggle an
+  undefined validation or hold-out AUC stops the run; the verdict counts such a seed pair as missing (arm becomes `incomplete`).
+- **GPU smoke test** (`P16_SMOKE=1`, kernel `rsna-weak-label-phase16-smoke`, private, T4, limit 25 min): 120 studies, seed 102, 2 epochs,
+  60 hold-out studies, the four arms (clip 1.0/5.0 x real/shuffled) plus an interrupt-at-epoch-1-then-resume run on the FP16/AMP path that must
+  reproduce the uninterrupted run exactly (history, model weights, scaler/optimizer/scheduler/RNG states present). Registry-equality checks
+  are relaxed in smoke mode only; leakage checks, hold-out disjointness and hash re-verification stay on. Estimate: about 7-9 min (about 0.15 GPU-hours).
+- **Full run** (`rsna-weak-label-phase16`, push with a 7,200 s limit): about 95-100 min as tabulated above.
+- **Export/persistence**: per-epoch full-state checkpoints in the work directory; each completed run writes `result.json` (metrics, partition
+  hash, leakage report, hold-out report, SHA-256 of kept checkpoints); real-run `last.pt` and `last_best.pt` are kept (about 2.8 GB), shuffled
+  controls keep hashes only; `final_summary.json` and `prereg_verdict.json` are written after every run so a killed kernel still leaves partial results.
