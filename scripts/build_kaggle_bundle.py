@@ -2,7 +2,7 @@
 import subprocess, zipfile, hashlib, json
 from pathlib import Path
 head=subprocess.check_output(["git","rev-parse","--short","HEAD"],text=True).strip()
-tracked=subprocess.check_output(["git","ls-files","mri_core","configs","scripts/kaggle_rsna_runner.py","scripts/kaggle_rsna_knee.py","scripts/kaggle_cnn.py","scripts/kaggle_weak_label_experiment.py","scripts/kaggle_weak_label_submit.py","scripts/build_weak_label_manifest.py"],text=True).split()
+tracked=subprocess.check_output(["git","ls-files","mri_core","configs","scripts/kaggle_rsna_runner.py","scripts/kaggle_rsna_knee.py","scripts/kaggle_cnn.py","scripts/kaggle_weak_label_experiment.py","scripts/kaggle_weak_label_submit.py","scripts/build_weak_label_manifest.py","scripts/evaluate_mrnet_readonly.py"],text=True).split()
 files=sorted(f for f in tracked if f.endswith((".py",".json",".md")) and "__pycache__" not in f)
 d=Path("outputs/kaggle_smoke/dataset2"); d.mkdir(parents=True,exist_ok=True)
 out=d/"rsna_weak_label_code.zip"
