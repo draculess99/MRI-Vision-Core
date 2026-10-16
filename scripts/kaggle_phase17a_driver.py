@@ -71,9 +71,30 @@ def sha_ids(ids):
 
 
 # ---- bundle
-side = glob.glob(str(pathlib.Path(os.environ.get("BUNDLE_DIR", INPUT)) / "**" / "BUNDLE_FILES.json"), recursive=True)
+def _find_bundle(base, max_depth=3, prune=("train_series", "test_series")):
+    """BUNDLE_FILES.json within max_depth directories of base (kaggle mounts at <slug>/ or a deeper owner/slug path); never scans the DICOM trees."""
+    found, frontier = [], [base]
+    for depth in range(max_depth + 1):
+        nxt = []
+        for directory in frontier:
+            try:
+                entries = list(os.scandir(directory))
+            except OSError:
+                continue
+            for entry in entries:
+                if entry.is_file() and entry.name == "BUNDLE_FILES.json":
+                    found.append(entry.path)
+                elif entry.is_dir() and entry.name not in prune and depth < max_depth:
+                    nxt.append(entry.path)
+        frontier = nxt
+    return sorted(found)
+
+
+_t = time.perf_counter()
+side = _find_bundle(pathlib.Path(os.environ.get("BUNDLE_DIR", INPUT)))
+SUMMARY["startup_seconds"] = {"bundle_search": round(time.perf_counter() - _t, 1)}
 if not side:
-    stop("code dataset with BUNDLE_FILES.json is not attached")
+    stop("code dataset with BUNDLE_FILES.json is not attached (searched 3 levels below the input root)")
 expected = json.loads(pathlib.Path(side[0]).read_text())
 root = pathlib.Path(side[0]).parent
 code = WORKING / "code"
@@ -109,33 +130,23 @@ SEEDS = [int(x) for x in os.environ["P17_SEEDS"].split(",")] if os.environ.get("
 if len(SEEDS) > 1 and not DRY and os.environ.get("P17_ALLOW_FULL") != "1":  # the five-seed experiment must be launched deliberately
     stop(f"{len(SEEDS)} seeds requested without P17_ALLOW_FULL=1; the full experiment needs explicit approval (one seed: P17_SEEDS=201)")
 EPOCHS = int(os.environ.get("P17_EPOCHS", REG["model"]["epochs"]))
+_t = time.perf_counter()
 meta_dir, dicom_root = discover_data(INPUT)
+SUMMARY["startup_seconds"]["discover_data"] = round(time.perf_counter() - _t, 1)
 SUMMARY["environment"] = {**device_info(), "free_disk_gb": round(shutil.disk_usage(WORKING).free / 1e9, 1)}
 if not SUMMARY["environment"]["cuda_available"] and not DRY:
     stop("no CUDA device available")
 metadata = load_rsna_metadata(meta_dir, dicom_root)
 
 # ---- inputs package (private dataset) and frozen definitions
-def _find_provenance():
-    if os.environ.get("P17_INPUTS"):
-        return glob.glob(str(pathlib.Path(os.environ["P17_INPUTS"]) / "PROVENANCE.json"))
-    found = []
-    for depth in ("*", "*/*", "*/*/*"):  # Kaggle mounts datasets at /kaggle/input/<slug>/ or a deeper owner/slug path
-        found += glob.glob(str(INPUT / depth / "PROVENANCE.json"))
-    return sorted(set(found))
-
-
-prov_files = _find_provenance()
-prov_files = [f for f in prov_files if json.loads(pathlib.Path(f).read_text()).get("kind") == "phase17a_inputs"]
-if len(prov_files) != 1:
-    listing = {str(p.relative_to(INPUT)): sorted(x.name for x in p.iterdir())[:8] for d in ("*", "*/*") for p in list(INPUT.glob(d))[:60] if p.is_dir()}
-    SUMMARY["input_listing_for_diagnosis"] = dict(list(listing.items())[:40])  # directory names only
-    stop(f"the private phase17a inputs dataset (PROVENANCE.json, kind phase17a_inputs) was found {len(prov_files)} times, expected exactly once")
-IN = pathlib.Path(prov_files[0]).parent
-PROV = json.loads((IN / "PROVENANCE.json").read_text())
-for name, info in PROV["files"].items():
-    if sha(IN / name) != info["sha256"]:
-        stop(f"{name} does not match PROVENANCE.json")
+from mri_core.kaggle_inputs import InputsError, locate_inputs_package  # noqa: E402  (after the bundle is on sys.path)
+_t = time.perf_counter()
+try:
+    IN, PROV = locate_inputs_package(INPUT, "phase17a_inputs", override=os.environ.get("P17_INPUTS"))
+except InputsError as error:
+    SUMMARY["inputs_diagnosis"] = {"code": error.code, **error.diagnostics}  # directory names and presence flags only
+    stop(f"inputs package problem ({error.code}): {error}")
+SUMMARY["startup_seconds"]["inputs_package"] = round(time.perf_counter() - _t, 1)
 if PROV["files"]["candidate_mask_v1.json"]["sha256"] != CAND["override_file_sha256"]:
     stop("candidate mask file differs from the frozen candidate definition")
 override = mo.load_override(IN / "candidate_mask_v1.json")

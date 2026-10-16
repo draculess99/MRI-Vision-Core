@@ -54,6 +54,7 @@ def discover_data(input_root: Path = INPUT_ROOT, max_depth: int = 4) -> tuple[Pa
     hits = []
     for current, dirs, files in os.walk(input_root):
         depth = len(Path(current).relative_to(input_root).parts)
+        dirs[:] = [d for d in dirs if d not in ("train_series", "test_series")]  # the DICOM trees hold ~100k files; never walk them
         if depth >= max_depth:
             dirs[:] = []
         if "train.csv" in files and "train_series.csv" in files:
