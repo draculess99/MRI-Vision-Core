@@ -91,3 +91,24 @@ def test_cli_shuffled_and_overfit_runs(world):  # noqa: F811
         assert "val_loss_p05" in json.loads((work / "baselines.json").read_text())
         assert (name == "overfit") == (sorted(state["train_study_ids"]) == sorted(state["valid_study_ids"]))
     assert len(set(fingerprints.values())) == 3  # a control can never resume or be mistaken for the real run
+
+
+def test_cli_holdout_eval_scores_unseen_studies_and_refuses_seen_ones(world):  # noqa: F811
+    manifest = build_manifest_for(SimpleNamespace(meta=world.meta, tmp=world.tmp))
+    cfg = world.tmp / "cfgh.json"
+    cfg.write_text(json.dumps({**CFG, "epochs": 1, "val_fraction": 0.34, "num_workers": 0, "arm": "C", "image_size": 16,
+                               "slices_per_series": 3, "cache_dir": str(world.tmp / "cacheh")}))
+    common = ["--data-dir", str(world.meta), "--dicom-root", str(world.raw), "--manifest", str(manifest), "--config", str(cfg)]
+    ids = json.loads(json.dumps(sorted(__import__("mri_core.weak_label_data", fromlist=["x"]).load_weak_manifest(manifest).ids)))
+    train_ids, hold_ids = ids[:4], ids[4:]
+    inc, hold = world.tmp / "inc.json", world.tmp / "hold.json"
+    inc.write_text(json.dumps(train_ids))
+    hold.write_text(json.dumps(hold_ids))
+    assert cli(["train", *common, "--include-studies", str(inc), "--work-dir", str(world.tmp / "runh")]) == 0
+    out = world.tmp / "holdout.json"
+    assert cli(["holdout-eval", *common, "--checkpoint", str(world.tmp / "runh" / "last.pt"), "--include-studies", str(hold),
+                "--output", str(out)]) == 0
+    report = json.loads(out.read_text())
+    assert report["studies"] == len(hold_ids) and report["disjoint_from_train_and_validation"] is True and set(report["prob_std"])
+    with pytest.raises(SystemExit):  # studies the checkpoint trained on are refused
+        cli(["holdout-eval", *common, "--checkpoint", str(world.tmp / "runh" / "last.pt"), "--include-studies", str(inc), "--output", str(out)])
