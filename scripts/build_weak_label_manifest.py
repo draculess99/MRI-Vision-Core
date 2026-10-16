@@ -32,6 +32,8 @@ def main(argv=None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--include-evidence", action="store_true", help="store evidence sentences (default: hashes only)")
+    parser.add_argument("--extractor-profile", default="0.1.0", choices=("0.1.0", "0.2.0"),
+                        help="0.1.0 reproduces the original manifest; 0.2.0 enables the audited fixes (separately versioned)")
     parser.add_argument("--min-decided", type=int, default=1,
                         help="minimum decided (positive/negative) ACTIVE targets a study needs to be included")
     parser.add_argument("--active-targets", default=None,
@@ -42,7 +44,7 @@ def main(argv=None) -> int:
         parser.error("--output is required unless --dry-run")
     train = pd.read_csv(args.train_csv, dtype={"StudyInstanceUID": str})
     test_ids = _ids(args.test_csv) + _ids(args.sample_submission)
-    rows, summary = build_manifest(train, RuleBasedExtractor(), test_ids=test_ids, holdout_ids=_ids(args.holdout_csv),
+    rows, summary = build_manifest(train, RuleBasedExtractor(args.extractor_profile), test_ids=test_ids, holdout_ids=_ids(args.holdout_csv),
                                    include_evidence=args.include_evidence, min_decided=args.min_decided,
                                    train_csv_sha256=sha256_file(args.train_csv),
                                    active_targets=None if args.active_targets is None else

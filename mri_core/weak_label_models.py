@@ -145,16 +145,22 @@ def load_pretrained_backbone(backbone: ResNet18Backbone, path: Path) -> dict:
 
 class RSNAKneePretrainedMIL(nn.Module):
     def __init__(self, num_planes: int = 3, dropout: float = 0.2, num_targets: int = RSNA_TARGET_COUNT,
-                 pretrained_path: Optional[Path] = None, freeze_bn: bool = True, input_size: Optional[int] = None):
+                 pretrained_path: Optional[Path] = None, freeze_bn: bool = True, input_size: Optional[int] = None,
+                 sequence: str = "none"):
         super().__init__()
         if num_planes not in (1, 2, 3):
             raise ValueError("Expected one to three planes")
         self.num_planes, self.num_targets, self.freeze_bn, self.input_size = num_planes, num_targets, freeze_bn, input_size
+        if sequence not in ("none", "gru"):
+            raise ValueError("sequence must be 'none' or 'gru'")
+        self.sequence = sequence
         self.backbone = ResNet18Backbone()
+        self.backbone.fc.requires_grad_(False)  # kept only so ImageNet checkpoints load strictly; never used
         self.pretrained_info = load_pretrained_backbone(self.backbone, pretrained_path) if pretrained_path else None
         features = self.backbone.out_features
         self.plane_embedding = nn.Parameter(torch.zeros(num_planes, features))
         self.attention = GatedAttention(features)
+        self.sequence_model = nn.GRU(features, features // 2, batch_first=True, bidirectional=True) if sequence == "gru" else None
         self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(features, num_targets))
         self.register_buffer("mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1), persistent=False)
         self.register_buffer("std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1), persistent=False)
@@ -186,7 +192,16 @@ class RSNAKneePretrainedMIL(nn.Module):
             stacked = nn.functional.interpolate(stacked, size=(self.input_size, self.input_size), mode="bilinear",
                                                 align_corners=False)
         embeddings = self.backbone((stacked - self.mean) / self.std)
-        grid = _scatter_valid(embeddings, mask) + self.plane_embedding.view(1, self.num_planes, 1, -1)
+        grid = _scatter_valid(embeddings, mask)
+        if self.sequence_model is not None:  # bidirectional GRU over each plane's slice order; packed, so padding never enters it
+            batch, planes, slices, features = grid.shape
+            lengths = mask.sum(dim=2).reshape(-1).cpu()
+            packed = nn.utils.rnn.pack_padded_sequence(grid.reshape(batch * planes, slices, features), lengths,
+                                                       batch_first=True, enforce_sorted=False)
+            out, _ = self.sequence_model(packed)
+            out, _ = nn.utils.rnn.pad_packed_sequence(out, batch_first=True, total_length=slices)
+            grid = grid + out.to(grid.dtype).reshape(batch, planes, slices, features)  # residual
+        grid = grid + self.plane_embedding.view(1, self.num_planes, 1, -1)
         flat_valid = mask.flatten(start_dim=1)
         pooled, _ = self.attention(grid.flatten(start_dim=1, end_dim=2), flat_valid)
         return self.head(pooled)
@@ -202,5 +217,6 @@ def build_model(arm: str, config: dict) -> nn.Module:
     if arm == "C":
         path = config.get("pretrained_weights")
         return RSNAKneePretrainedMIL(planes, dropout, pretrained_path=Path(path) if path else None,
-                                     freeze_bn=bool(config.get("freeze_bn", True)), input_size=config.get("encoder_input_size"))
+                                     freeze_bn=bool(config.get("freeze_bn", True)), input_size=config.get("encoder_input_size"),
+                                     sequence=config.get("sequence", "none"))
     raise ValueError(f"Unknown arm {arm!r}; expected one of {ARMS}")
