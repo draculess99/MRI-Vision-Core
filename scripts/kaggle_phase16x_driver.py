@@ -304,8 +304,10 @@ for pname, sl in parts.items():
         for k, j in enumerate(wc.ACTIVE_IDX):
             on = masks[:, j] == 1
             y = np.nan_to_num(labels[on, j]).astype(int)
-            c.append(wc.stratified_auc(y, sc["metadata_logreg"][on, k], st[on, k])[1])
-        cover[sname] = [round(float(x), 3) for x in c]
+            sk, stk = sc["metadata_logreg"][on, k], st[on, k]
+            good = ~np.isnan(sk)  # undefined baseline scores (single-class training target) are excluded, never filled in
+            c.append(wc.stratified_auc(y[good], sk[good], stk[good])[1] if good.any() else None)
+        cover[sname] = [None if x is None else round(float(x), 3) for x in c]
     analysis[pname] = {"studies": len(labels), "class_counts": {t: {"positive": int(((labels[:, j] == 1) & (masks[:, j] == 1)).sum()),
                        "negative": int(((labels[:, j] == 0) & (masks[:, j] == 1)).sum())} for t, j in zip(wc.ACTIVE, wc.ACTIVE_IDX)},
                        "bootstrap": boot, "untrained_macro_auc": untrained,
