@@ -44,3 +44,11 @@ submission.csv
 # closes that gap explicitly rather than relying on procedural discipline alone.
 kaggle_checkpoints_tmp/
 *.zip
+
+# Model weights, archives and credentials (hardening)
+*.tar
+*.pt
+*.pth
+*.npz
+kaggle.json
+credentials.json
