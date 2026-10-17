@@ -62,8 +62,62 @@ class TestNoConfiguration:
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         assert any("Enter a real data_root and checkpoint path" in info.value for info in at.info)
-        assert len(at.button) == 0
+        assert "run_inference_button" not in [b.key for b in at.button]
 
+
+class TestSyntheticDemoNeedsNoRealData:
+    """This is also the Railway-readiness smoke test: with zero AMD_KAGGLE_*/real-data
+    configuration (exactly the state of a fresh deploy before any real dataset/checkpoint is
+    bundled or authorized), the app must still load cleanly and the synthetic demonstration
+    path must work end to end -- real inference staying unavailable is expected, not a bug."""
+
+    def test_app_loads_and_synthetic_section_is_expanded_with_zero_real_config(self, no_env):
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert "synthetic_demo_button" in [b.key for b in at.button]
+
+    def test_running_the_synthetic_demo_never_claims_a_real_bridged_checkpoint(self, no_env):
+        """Regression test for a real bug found during development: the synthetic result
+        briefly inherited agent_bridge_adapter's "externally trained Kaggle checkpoint"
+        warning, which would have falsely implied a real checkpoint was used."""
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+
+        assert not at.exception
+        assert any("SYNTHETIC WORKFLOW DEMONSTRATION" in e.value for e in at.error)
+        assert not any("externally trained Kaggle checkpoint" in w.value for w in at.warning)
+        assert any("no real neural-network inference occurred" in w.value for w in at.warning)
+
+    def test_synthetic_demo_runs_the_full_evidence_and_review_workflow(self, no_env):
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+
+        buttons = {b.key for b in at.button}
+        assert {"synthetic_approve_button", "synthetic_request_more_evidence_button", "synthetic_escalate_button"} <= buttons
+
+        at.text_area(key="synthetic_reason_input").set_value("synthetic demo review").run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_approve_button").click().run(timeout=RUN_TIMEOUT)
+        assert any("Recorded 'approve'" in s.value for s in at.success)
+
+    def test_synthetic_demo_probabilities_are_deterministic_not_randomized(self):
+        from hackathon.amd.synthetic_demo import build_synthetic_demo_result
+
+        first = build_synthetic_demo_result().probabilities
+        second = build_synthetic_demo_result().probabilities
+        assert first == second
+
+    def test_real_inference_path_is_unaffected_by_the_synthetic_section_existing(self, no_env):
+        """The synthetic section must not consume the real-path gate or prevent the real
+        "enter a data_root" prompt from still appearing when no real config is set."""
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert any("Enter a real data_root and checkpoint path" in info.value for info in at.info)
+
+
+class TestNoConfiguration:
     def test_amd_token_factory_is_unchecked_by_default(self, no_env):
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
@@ -108,7 +162,7 @@ class TestDataPathPrefillAndValidation:
         at.run(timeout=RUN_TIMEOUT)
         assert not at.exception
         assert any("Data directory not found" in e.value for e in at.error)
-        assert len(at.button) == 0
+        assert "run_inference_button" not in [b.key for b in at.button]
 
     def test_missing_checkpoint_shows_a_clean_error_without_crashing(self, monkeypatch, tmp_path):
         root = tmp_path / "rsna-knee"
@@ -123,7 +177,7 @@ class TestDataPathPrefillAndValidation:
         at.run(timeout=RUN_TIMEOUT)
         assert not at.exception
         assert any("Checkpoint file not found" in e.value for e in at.error)
-        assert len(at.button) == 0
+        assert "run_inference_button" not in [b.key for b in at.button]
 
     def test_wrong_checkpoint_extension_shows_a_clean_error_without_crashing(self, monkeypatch, tmp_path):
         root = tmp_path / "rsna-knee"
@@ -139,7 +193,7 @@ class TestDataPathPrefillAndValidation:
         at.run(timeout=RUN_TIMEOUT)
         assert not at.exception
         assert any(".ckpt" in e.value and "extension" in e.value for e in at.error)
-        assert len(at.button) == 0
+        assert "run_inference_button" not in [b.key for b in at.button]
 
     def test_missing_dataset_metadata_shows_a_clean_error_without_crashing(self, monkeypatch, tmp_path):
         root = tmp_path / "rsna-knee"
@@ -154,7 +208,7 @@ class TestDataPathPrefillAndValidation:
         at.run(timeout=RUN_TIMEOUT)
         assert not at.exception
         assert any("train.csv" in e.value for e in at.error)
-        assert len(at.button) == 0
+        assert "run_inference_button" not in [b.key for b in at.button]
 
 
 @requires_real_assets
@@ -191,24 +245,24 @@ class TestFullPipeline:
         assert any("externally trained Kaggle checkpoint" in w.value for w in at.warning)
         # Review-gate starts PENDING_REVIEW and all three actions are available immediately.
         buttons = {b.key: b for b in at.button}
-        assert set(buttons) >= {"approve_button", "request_more_evidence_button", "escalate_button"}
-        assert not buttons["approve_button"].disabled
+        assert set(buttons) >= {"real_approve_button", "real_request_more_evidence_button", "real_escalate_button"}
+        assert not buttons["real_approve_button"].disabled
 
     def test_review_action_without_reason_is_rejected(self, real_env):
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.button(key="approve_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="real_approve_button").click().run(timeout=RUN_TIMEOUT)
         assert any("A reason is required" in e.value for e in at.error)
         # The gate must still be PENDING_REVIEW -- the human-approval gate was not bypassed.
-        assert not at.button(key="approve_button").disabled
+        assert not at.button(key="real_approve_button").disabled
 
     def test_approve_records_audit_entry_and_closes_the_gate(self, real_env):
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.text_area(key="reason_input").set_value("evidence looks complete").run(timeout=RUN_TIMEOUT)
-        at.button(key="approve_button").click().run(timeout=RUN_TIMEOUT)
+        at.text_area(key="real_reason_input").set_value("evidence looks complete").run(timeout=RUN_TIMEOUT)
+        at.button(key="real_approve_button").click().run(timeout=RUN_TIMEOUT)
 
         assert any("Recorded 'approve'" in s.value for s in at.success)
         rows = at.table[-1].value
@@ -217,16 +271,16 @@ class TestFullPipeline:
 
         # One more rerun to see the now-terminal state reflected in the buttons.
         at.run(timeout=RUN_TIMEOUT)
-        assert at.button(key="approve_button").disabled
-        assert at.button(key="escalate_button").disabled
-        assert at.button(key="request_more_evidence_button").disabled
+        assert at.button(key="real_approve_button").disabled
+        assert at.button(key="real_escalate_button").disabled
+        assert at.button(key="real_request_more_evidence_button").disabled
 
     def test_escalate_is_distinguishable_from_approve_in_the_audit_trail(self, real_env):
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.text_area(key="reason_input").set_value("needs senior review").run(timeout=RUN_TIMEOUT)
-        at.button(key="escalate_button").click().run(timeout=RUN_TIMEOUT)
+        at.text_area(key="real_reason_input").set_value("needs senior review").run(timeout=RUN_TIMEOUT)
+        at.button(key="real_escalate_button").click().run(timeout=RUN_TIMEOUT)
 
         rows = at.table[-1].value
         last_row = rows.iloc[-1]
@@ -247,7 +301,7 @@ class TestOptionalLLMSection:
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.button(key="llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
         assert any("Produced by: local" in c.value for c in at.caption)
@@ -270,8 +324,8 @@ class TestOptionalLLMSection:
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.radio(key="llm_provider_choice").set_value("Groq (requires GROQ_API_KEY)").run(timeout=RUN_TIMEOUT)
-        at.button(key="llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        at.radio(key="real_llm_provider_choice").set_value("Groq (requires GROQ_API_KEY)").run(timeout=RUN_TIMEOUT)
+        at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
         assert any("Produced by: local" in c.value for c in at.caption)
@@ -287,8 +341,8 @@ class TestOptionalLLMSection:
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.radio(key="llm_provider_choice").set_value("Groq (requires GROQ_API_KEY)").run(timeout=RUN_TIMEOUT)
-        at.button(key="llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        at.radio(key="real_llm_provider_choice").set_value("Groq (requires GROQ_API_KEY)").run(timeout=RUN_TIMEOUT)
+        at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
         assert any("local" in c.value for c in at.caption)
@@ -314,8 +368,8 @@ class TestOptionalLLMSection:
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.radio(key="llm_provider_choice").set_value("Groq (requires GROQ_API_KEY)").run(timeout=RUN_TIMEOUT)
-        at.button(key="llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        at.radio(key="real_llm_provider_choice").set_value("Groq (requires GROQ_API_KEY)").run(timeout=RUN_TIMEOUT)
+        at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
         assert any("Produced by: groq" in c.value for c in at.caption)
@@ -344,8 +398,8 @@ class TestOptionalLLMSection:
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.radio(key="llm_provider_choice").set_value("AMD Token Factory (optional)").run(timeout=RUN_TIMEOUT)
-        at.button(key="llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        at.radio(key="real_llm_provider_choice").set_value("AMD Token Factory (LLM reasoning, requires .env config)").run(timeout=RUN_TIMEOUT)
+        at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
         assert any("Produced by: local" in c.value for c in at.caption)
@@ -375,8 +429,8 @@ class TestOptionalLLMSection:
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.radio(key="llm_provider_choice").set_value("AMD Token Factory (optional)").run(timeout=RUN_TIMEOUT)
-        at.button(key="llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        at.radio(key="real_llm_provider_choice").set_value("AMD Token Factory (LLM reasoning, requires .env config)").run(timeout=RUN_TIMEOUT)
+        at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
         assert any("Produced by: amd_token_factory" in c.value for c in at.caption)
@@ -403,8 +457,8 @@ class TestOptionalLLMSection:
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.radio(key="llm_provider_choice").set_value("AMD Token Factory (optional)").run(timeout=RUN_TIMEOUT)
-        at.button(key="llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        at.radio(key="real_llm_provider_choice").set_value("AMD Token Factory (LLM reasoning, requires .env config)").run(timeout=RUN_TIMEOUT)
+        at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
         assert any("Produced by: local (fallback:" in c.value for c in at.caption)
@@ -415,9 +469,9 @@ class TestOptionalLLMSection:
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.button(key="llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
 
-        assert not at.button(key="approve_button").disabled
-        assert not at.button(key="escalate_button").disabled
-        assert not at.button(key="request_more_evidence_button").disabled
+        assert not at.button(key="real_approve_button").disabled
+        assert not at.button(key="real_escalate_button").disabled
+        assert not at.button(key="real_request_more_evidence_button").disabled
         assert any("No review actions recorded yet." in c.value for c in at.caption)

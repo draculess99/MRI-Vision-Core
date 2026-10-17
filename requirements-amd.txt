@@ -1,0 +1,33 @@
+# Consolidated runtime dependencies for hackathon/amd/streamlit_app.py on Railway (or any
+# fresh environment). Supersedes piecing together requirements.txt + requirements-cnn.txt +
+# requirements-rsna.txt for this specific app, which omits several packages this app actually
+# needs transitively (timm, pydicom's real usage, iterative-stratification -- pulled in by
+# mri_core.rsna_inference_engine -> rsna_knee_inference -> rsna_knee_train's module-level
+# import, even though nothing on this page trains anything).
+#
+# Versions below are bounded to what this app was actually verified against in this session
+# (see hackathon/amd/README.md's "Railway deployment readiness" section), not guessed.
+
+# --- Streamlit app itself ---
+streamlit>=1.60,<2
+requests>=2.30,<3
+
+# --- Shared mri_core import chain (DICOM/NIfTI loading, preprocessing, RSNA engine, agents) ---
+numpy>=2.0,<3
+pandas>=2.0,<3
+pydicom>=3.0,<4
+nibabel>=5.0,<6
+opencv-python-headless>=4.9,<6
+Pillow>=10.0,<13
+scikit-learn>=1.5,<2
+iterative-stratification>=0.1.7,<0.2
+
+# --- Bridged checkpoint (hackathon/amd/kaggle_mil_bridge.py) ---
+timm>=1.0,<2
+
+# --- PyTorch (CPU build; swap for a ROCm build only on a real AMD GPU host) ---
+torch>=2.6,<3
+
+# --- Optional: safe to omit, both degrade gracefully (see llm_config.py / benchmark.py) ---
+python-dotenv>=1.0,<2
+psutil>=6.0,<8

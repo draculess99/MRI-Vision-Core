@@ -1,428 +1,487 @@
-# AMD / ROCm adapter
+# MRI-Vision-Core — AMD hackathon submission
 
-Thin adapter over the shared MRI-Core engine (`mri_core.rsna_inference_engine`) for the AMD
-Developer Hackathon. All AMD-specific code lives in `hackathon/amd/`; `mri_core/`, `main`, and the
-OpenCV/Nebius branches are untouched. Based on `integration/mri-core-shared` @ `1643d45`.
+> **Research prototype. Not a diagnostic device.** Every score below is a raw, uncalibrated
+> sigmoid output. Nothing in this project is a clinical finding, a diagnosis, or a confidence
+> score, and no part of it is validated for clinical use.
 
-> Research prototype, not a diagnostic device. Probabilities are raw, uncalibrated sigmoid outputs
-> of a model trained on at most 58 labeled studies. Nothing here is a clinical finding or a
-> confidence score. No training happens in this adapter.
+This document is written for someone who has never seen MRI-Vision-Core before. If you only
+read one section, read "What this AMD submission demonstrates" and look at Diagram B.
 
-## Modules
+## MRI-Vision-Core, the project
 
-| Command | Purpose |
-|---|---|
-| `python -m hackathon.amd.rocm_env [--require-amd] [--smi]` | Reports torch/ROCm build, visible devices, `rocm-smi`/`amd-smi`. `amd_gpu_available` is true only for a ROCm (HIP) torch build with a visible device; a CUDA or CPU-only build reports `false` with reasons. |
-| `python -m hackathon.amd.run_inference --data-root D --checkpoint C.pt [--study-uid U] [--device cuda]` | One real study through the shared engine. Writes `outputs/amd/prediction.json`. Fails (exit 1) rather than inventing output if the checkpoint or study is missing. |
-| `python -m hackathon.amd.benchmark --data-root D --checkpoint C.pt [--iterations 50 --warmup 5 --batch-sizes 1 4]` | CPU baseline vs AMD GPU, native `RSNAKneeCNN` path, on the identical checkpoint, preprocessed tensors, and config. Writes `outputs/amd/benchmark.json`. |
-| `python -m hackathon.amd.benchmark_kaggle_bridge --data-root D --checkpoint fold0-knee-mil-best.ckpt [--iterations 50 --warmup 5 --batch-sizes 1 4]` | Same CPU-vs-AMD-GPU measurement, for the bridged Kaggle attention-MIL checkpoint (see "Bridged real-checkpoint smoke test" below). Writes `outputs/amd/benchmark_kaggle_bridge.json`. Does not modify or import model logic from `benchmark.py`; only its generic, model-agnostic timing/memory helpers are reused. |
+MRI-Vision-Core started as a Python/OpenCV MRI exploration tool (loading DICOM/NIfTI studies,
+preprocessing, segmentation) and grew a shared, reusable core — `mri_core/` — that several
+independent hackathon submissions now build on top of, each demonstrating something different
+with the *same* underlying inference engine and evidence-review infrastructure rather than
+reimplementing it per hackathon. That shared code lives on `integration/mri-core-shared` and is
+reused, never modified, by each hackathon branch.
 
-Add `--dicom-root` if DICOMs are not under `<data-root>/raw` (native path only; the bridged path always reads `<data-root>/raw/train_series/...`).
+```mermaid
+flowchart LR
+    Shared["integration/mri-core-shared<br/>mri_core/ : DICOM/NIfTI loading, preprocessing,<br/>RSNA inference engine, specialist/critic/consensus<br/>evidence-review agents, human-review gate"]
 
-## Output separation (`prediction.json`)
+    Shared --> OpenCV["hackathon/opencv-aws<br/>OpenCV-focused demo"]
+    Shared --> Nebius["hackathon/nebius-nvidia<br/>Nebius / NVIDIA demo"]
+    Shared --> IBM["hackathon/ibm-bob-2<br/>IBM demo"]
+    Shared --> Amazon["hackathon/amazon-alexa-copilot<br/>Amazon Alexa demo"]
+    Shared --> AMD["hackathon/amd<br/>THIS submission"]
 
-Three top-level sections that never share data:
-
-- `prediction` - the engine's `StudyInferenceResult`, verbatim (probabilities, provenance with
-  checkpoint SHA-256, latency).
-- `evidence_review` - deterministic evidence/consistency checks from `mri_core.agents`, with
-  `quality_gate_status` defaulting to `NOT_ASSESSED`, and `uncertainty.status = "not_estimated"`
-  (no uncertainty method exists for these checkpoints). Contains no probabilities.
-- `human_review_gate` - simulated review state machine, starts at `PENDING_REVIEW`, bound to the
-  evidence fingerprint. No clinician approval is implied.
-
-The OpenCV branch's own ChangeGuard module is not part of the shared commit and was not copied;
-the shared evidence layer above is what this adapter surfaces.
-
-## Benchmark methodology
-
-- Study is preprocessed once; the same tensors go to every device (preprocessing time reported
-  separately, excluded from device latency).
-- Warm-up iterations are discarded; GPU timing is bracketed by `torch.cuda.synchronize()`.
-- Reports per batch size: mean/median/p95/min/max/stdev latency and throughput (studies/s).
-- GPU resources: peak allocated/reserved bytes, total/free memory, raw `rocm-smi`/`amd-smi` text.
-  CPU: torch threads and process RSS (needs `psutil`).
-- `max_abs_prob_diff_vs_cpu` is recorded as a numerical sanity check.
-- With no AMD GPU, the `gpu` block says `unavailable` with reasons and contains **no numbers**;
-  no speedup is computed. `--require-gpu` turns that into exit code 2. `--allow-non-amd` is a
-  dev-only escape hatch and labels the result `is_amd_rocm: false`.
-- Speed only: no accuracy or clinical claim.
-
-## Running on an AMD cloud GPU
-
-```bash
-# ROCm build of PyTorch (match your ROCm version), then:
-pip install -r requirements-rsna.txt psutil
-python -m hackathon.amd.rocm_env --require-amd --smi --output outputs/amd/env.json
-python -m hackathon.amd.run_inference --data-root data/rsna-knee --checkpoint <trained last.pt> --device cuda
-python -m hackathon.amd.benchmark     --data-root data/rsna-knee --checkpoint <trained last.pt> --require-gpu
+    AMD --> Bridge["kaggle_mil_bridge.py<br/>bridges an externally-trained checkpoint<br/>into the shared evidence contract,<br/>since mri_core's own loaders can't read it"]
+    AMD --> LLMLayer["llm_providers.py / llm_config.py<br/>Groq + AMD Token Factory + local fallback --<br/>unique to this branch"]
+    AMD --> UI["streamlit_app.py<br/>this branch's interactive demo"]
 ```
 
-ROCm PyTorch exposes the AMD GPU through the `cuda` device name.
+Every hackathon branch reuses `mri_core/` as-is; none of them modify it. What differs is which
+capability each branch chooses to demonstrate on top of it.
+
+## What this AMD submission demonstrates
+
+Four things, each real, each independently verifiable:
+
+1. **Trained MRI inference** on a real local DICOM study, through a real externally-trained
+   checkpoint, bridged into the shared pipeline (see "The data and the model" below).
+2. **Deterministic specialist/critic/consensus evidence review** — the *same*, unmodified
+   shared code every other hackathon branch uses, applied here to the bridged result.
+3. **AMD Token Factory-assisted interpretation** (with Groq as an alternative, and a local,
+   network-free fallback) — optional, explicitly gated, and never trusted automatically.
+4. **Simulated human oversight** — an audited approve/request-more-evidence/escalate workflow
+   that no AI output, however well-formed, can bypass.
+
+What this submission does **not** demonstrate: no AMD GPU acceleration has been run anywhere in
+this project (every inference and benchmark run so far has been CPU-only); no training happens
+in this adapter; no accuracy/validation metric for the bridged checkpoint has been independently
+verified here (see below for exactly why, and what *is* verified).
+
+## The data and the model
+
+**Data source:** the [RSNA Knee Abnormality Detection](https://www.kaggle.com/) Kaggle
+competition's knee MRI DICOM studies. Locally, a `data_root` directory holds `train.csv` /
+`train_series.csv` (study- and series-level metadata — plane, fluid-sensitivity, the 12 target
+labels) plus `raw/train_series/<StudyInstanceUID>/<SeriesInstanceUID>/*.dcm` (the actual DICOM
+slice files). None of this data, and no model checkpoint, is committed to this repository —
+both are gitignored and supplied locally (see "Running it yourself").
+
+**What was trained, and where:** a `timm` `efficientnet_b0` backbone (ImageNet-pretrained,
+**frozen**) feeding a trainable **gated attention-MIL pooling** head (Ilse et al.'s
+attention-based multiple-instance-learning formulation) and a linear layer producing **12
+logits** — one per target (`ACL, MCL, Medial Meniscus, Lateral Meniscus, Medial OA, Lateral OA,
+PF OA, Effusion, Synovitis, Baker's, Contusion, Fracture`). Only the pooling+head (~343K
+parameters) was ever trained; the backbone's ImageNet weights were never fine-tuned. Training
+happened in an **external Kaggle notebook** (`kneeabdet-baseline-v1`, PyTorch Lightning,
+5-fold stratified cross-validation) on **at most 58 fully gold-labeled studies (46-48 per
+fold)** — not inside this repository, and not by this adapter, which performs no training at
+all.
+
+**Why attention-MIL, not a single-image CNN:** a knee MRI series is 20-30 slices, and an
+abnormality (e.g. an ACL tear) is visible on only a handful of them. Attention-MIL lets the
+model learn *which* slices matter for each study, rather than averaging over all of them (which
+dilutes a lesion visible on 2 slices out of 24) or picking one slice heuristically.
+
+**No accuracy/AUC claim is made for this checkpoint.** Nothing in this project has
+independently re-evaluated it against held-out labels; the only properties verified here are
+structural — it loads, it produces 12 well-formed probabilities in `[0, 1]`, and it is
+reproducible bit-for-bit across repeated runs on the same input. (A *different* experimental
+architecture — "Model C0," documented separately on another branch — does have published
+weak-label AUC diagnostics; that is a different model, trained on different data, and is not
+used here — see "Validation evidence and limitations.")
+
+**24-slice preprocessing** (must match the original training notebook exactly, or the sigmoid
+outputs are meaningless): 24 slices sampled at evenly spaced indices through the series, each
+decoded and resized to 224×224, then 1st/99th-percentile intensity normalization per study
+(fixes cross-scanner intensity scale), then single-channel standardization using the three
+ImageNet channel statistics averaged into one (mean 0.449, std 0.226, since the pretrained
+backbone expects zero-mean/unit-std input and the MRI is single-channel, not RGB).
+
+**The Kaggle checkpoint compatibility bridge:** the shared `mri_core` pipeline's own model
+(`RSNAKneeCNN`, an MRNet-style multi-plane encoder) is architecturally unrelated to this
+checkpoint — different backbone, different pooling, different state-dict keys entirely.
+`mri_core`'s own loaders cannot read this checkpoint, and no checkpoint compatible with
+`RSNAKneeCNN` exists anywhere on the machines this project has been developed on.
+`hackathon/amd/kaggle_mil_bridge.py` is a minimal, **inference-only** reimplementation of the
+Kaggle architecture (not a modification of `mri_core`) so these real external weights can
+actually be run; `hackathon/amd/agent_bridge_adapter.py` then adapts its output into the shared
+`StudyInferenceResult` type so every downstream evidence-review module works completely
+unmodified on a bridged result (see Diagram B).
+
+## Diagram B — the full AMD workflow
+
+```mermaid
+flowchart TD
+    DS["RSNA knee DICOM study<br/>(real local data)"] --> PRE
+    PRE["DICOM preprocessing<br/>24 slices · 224x224 resize<br/>percentile + ImageNet normalization<br/>(kaggle_mil_bridge.py)"] --> NET
+    NET["Trained neural network<br/>EfficientNet-B0 backbone (frozen)<br/>+ gated attention-MIL pooling<br/>(externally trained, bridged checkpoint)"] --> SCORES
+    SCORES["12 raw sigmoid scores<br/>uncalibrated, non-diagnostic"] --> BUNDLE
+
+    BUNDLE["EvidenceBundle<br/>mri_core.agents.contracts<br/>frozen, fingerprinted"] --> SPEC
+    BUNDLE --> CRIT
+    SPEC["Specialist<br/>groups the 12 scores into<br/>4 categories, no interpretation"] --> CONS
+    CRIT["Critic<br/>structural/consistency checks<br/>e.g. label order, provenance, range"] --> CONS
+    CONS["Consensus<br/>one WorkflowStatus<br/>e.g. MORE_EVIDENCE_REQUIRED"] --> REVIEW
+
+    REVIEW["Human review gate<br/>PENDING_REVIEW<br/>approve / request-more-evidence / escalate<br/>append-only audit trail"]
+
+    BUNDLE -.-> REDACT
+    CONS -.-> REDACT
+    REDACT["redact_for_external_llm()<br/>strict allowlist only --<br/>no study UID, no checkpoint path/hash"] --> PROVIDER
+    PROVIDER{"LLM_PROVIDER<br/>(.env-configured)"}
+    PROVIDER -->|amd_token_factory| AMDLLM["AMD Token Factory<br/>(Qwen3.8-27B)"]
+    PROVIDER -->|groq| GROQ["Groq<br/>(openai/gpt-oss-20b)"]
+    PROVIDER -->|local / unset / disallowed| LOCAL["Local deterministic template<br/>no network call"]
+    AMDLLM --> SCREEN
+    GROQ --> SCREEN
+    LOCAL --> SCREEN
+    SCREEN["screen_proposal()<br/>BLOCKED or QUARANTINED --<br/>there is no 'verified' outcome"] --> PANEL
+    PANEL["Quarantined LLM text panel<br/>display only"]
+
+    PANEL -.->|never feeds into| REVIEW
+    SCREEN -.->|cannot bypass| REVIEW
+```
+
+**The dotted lines are the point of this diagram.** The LLM branch (bottom half) reads the same
+evidence the human reviewer sees, but nothing it produces — however well-formed, however
+plausible — ever reaches `REVIEW`. The human-review gate only ever changes state because a
+named human clicked a button with a reason attached.
+
+## Evidence review: what specialist, critic, and consensus each do
+
+All three are shared, unmodified `mri_core.agents` code — every hackathon branch gets the
+identical guarantees.
+
+| Layer | Responsibility | Never does |
+|---|---|---|
+| **Specialist** | Groups the 12 raw scores into 4 categories (Ligaments, Menisci, Osteoarthritis, Other) for readability | Interpret, round, or recompute any value |
+| **Critic** | Runs deterministic structural checks — label order matches the 12 targets, every probability is finite and in `[0, 1]`, checkpoint provenance is present, the engine's own status/probability fields agree with each other | Certify anything as "safe"; a passing check is not a safety signal |
+| **Consensus** | Applies a documented, fixed rule order to produce exactly one `WorkflowStatus` (e.g. `MORE_EVIDENCE_REQUIRED`, `EVIDENCE_COMPLETE_FOR_RESEARCH_REVIEW`, `INCONSISTENT_EVIDENCE`) | Average opinions into a score, or invent a status not in that fixed list |
+
+For a bridged run, consensus will — correctly, every time — report `MORE_EVIDENCE_REQUIRED`:
+the deterministic image-quality gate (`mri_core.decision`) has never been run against this
+bridge's own preprocessing, so `quality_gate_status` stays `NOT_ASSESSED`, which the consensus
+rules treat as incomplete evidence. This is intentional honesty, not a bug.
+
+## Optional AI-assisted interpretation
+
+A second, independent, optional layer: ask an LLM to restate the deterministic evidence above
+in plain language. It is **never required**, **never trusted automatically**, and **never
+able to influence the human-review decision** — see the dotted lines in Diagram B.
+
+**Why LLM text cannot change an approval decision, structurally, not by convention:**
+- The LLM only ever sees a strict allowlist (`redact_for_external_llm()`): workflow status,
+  grouped scores, structural finding codes, quality-gate status, limitations. It never
+  receives the study UID, checkpoint path/hash, or any file path.
+- Its output (`RawProposal`) is always run through the shared, unmodified
+  `screen_proposal()`, which can only return **BLOCKED** (an automated check failed — a
+  diagnosis-shaped claim, an invented approval phrase, an unsupported citation, excess length)
+  or **QUARANTINED** (passed every automated check, but still unverified free text). There is
+  no third outcome, and no function anywhere promotes a `QUARANTINED` result to trusted
+  evidence.
+- `hackathon/amd/review_actions.py` and `mri_core.agents.review_gate.ReviewGate` — the actual
+  human-approval code — never read an LLM adapter's output at all. The two code paths don't
+  share any state; a bug in one cannot leak into the other because there is no connection.
+
+**Providers:**
+
+| Provider | Model | Status |
+|---|---|---|
+| **AMD Token Factory** | `Qwen3.8-27B` | **Implemented and live-verified**, twice, with synthetic non-medical data only (see below) |
+| **Groq** | `openai/gpt-oss-20b` (configurable) | **Implemented and live-verified** once, synthetic data only |
+| **Local (default)** | none — a fixed deterministic template | Always available; no network call, no credential |
+
+**Configuration is `.env`/environment-driven, not code** (see `.env.example`). The hard safety
+rule: `LLM_ALLOW_EXTERNAL_CALLS` must be explicitly `true`, *in addition to* `LLM_PROVIDER`
+naming that provider and its credentials all being present — an ambient API key sitting in the
+environment is never, by itself, enough to authorize a live call (this was a real incident
+during development; it is now a permanent regression test). A failed external-provider call
+never automatically tries another external provider — only the local, network-free fallback.
+
+**Live verification record** (both syntheic-data-only, non-medical, each exactly once per the
+scope authorized at the time):
+- **AMD Token Factory**: `POST {base_url}/chat/completions`, model `Qwen3.8-27B` — HTTP 200 in
+  4.331s (isolated connectivity check) and again in 18.14s (full pipeline check: real
+  `redact_for_external_llm()` → `propose()` → `screen_proposal()`, confirmed no identifying
+  data transmitted, human-review state unchanged). The second call returned **BLOCKED** — a
+  619-character response exceeded the shared 500-character proposal-length cap, and
+  `screen_proposal()` correctly rejected it. Fix applied: the shared prompt now asks for one
+  sentence under 350 characters, and the adapter itself now enforces that same 500-character
+  cap (imported from `mri_core.agents.llm_adapter.MAX_PROPOSAL_LENGTH`, not a separate number)
+  *before* a response ever reaches `screen_proposal()` — that shared gate itself was never
+  touched, loosened, or bypassed.
+- **Groq**: HTTP 200 in 1.848s, valid structured JSON, model `openai/gpt-oss-20b`.
+- A caveat worth stating plainly: no official AMD documentation for the "Token Factory" REST
+  contract used above was ever found during development — the publicly documented "Token
+  Factory" API belongs to a different company (Nebius). The two successful live calls above are
+  the only evidence this specific base URL/contract is real; treat it as account-specific.
+- Every other failure mode (missing/invalid credentials, timeout, rate limit, malformed
+  response, oversized response, unsafe-claim text, connection error) is covered by **79
+  mocked tests** in `tests/test_amd_llm_providers.py` — re-runnable anytime, with no network
+  call and no live API spend.
+
+## Human review and the audit trail
+
+A real, append-only state machine (`mri_core.agents.review_gate.ReviewGate`, unmodified),
+scoped to one evidence fingerprint. States: `PENDING_REVIEW` → `MORE_EVIDENCE_REQUESTED` or
+`REVIEWED` (terminal in this simulation — no reopening). Every transition requires a named
+`actor` and a non-empty `reason`; both are validated before the transition is even attempted.
+
+The shared gate has no separate "escalated" state, and adding one to shared `mri_core` code was
+out of scope for this branch, so `hackathon/amd/review_actions.py`'s `escalate()` transitions to
+the same `REVIEWED` state `approve()` uses, but always with the audit `reason` prefixed
+`"ESCALATED: "` — visibly distinguishable in the history table, never silently merged with a
+plain approval.
+
+**No clinician approval is implied by any state here.** This is a simulated workflow-audit
+demonstration, not a certified medical review process.
+
+## The Streamlit UI, control by control
+
+Launch with `streamlit run hackathon/amd/streamlit_app.py` (see "Running it yourself").
+
+### Sidebar
+
+| Control | Key | Purpose |
+|---|---|---|
+| "RSNA knee data_root" text input | `data_root_input` | Path to a real local directory with `train.csv` and `raw/train_series/...`. Prefilled from `AMD_KAGGLE_RSNA_ROOT` (env or `.env`); editable freely. Works with Windows (`D:\...`) or Linux (`/app/...`) paths. |
+| "Kaggle checkpoint (.ckpt)" text input | `checkpoint_input` | Path to a real `foldN-knee-mil-best.ckpt` file. Prefilled from `AMD_KAGGLE_CHECKPOINT`. |
+| **"Execution provider (hardware, not AI text)"** section | — | Where the model's forward pass would run — unrelated to the AI-text section further down. |
+| "Enable AMD Token Factory hardware execution (optional, not implemented)" checkbox | `amd_enabled_checkbox` | **Status display only.** There is no real client behind this; checking it never dispatches anything to AMD hardware. Shown unchecked and disabled-by-default. |
+| "Try LLM text provider" radio | `llm_provider_choice` | Which AI-text provider to *attempt*. Only takes effect if it matches the environment-configured `LLM_PROVIDER` **and** `LLM_ALLOW_EXTERNAL_CALLS=true`; otherwise it transparently falls back to local, and says so. |
+
+If either data_root or checkpoint is empty, or fails a cheap validation check (directory/file
+existence, `.ckpt` extension, `train.csv` presence — never a full dataset/checkpoint load just
+to validate the sidebar), the app shows a specific error and stops; it never guesses a path or
+fabricates a result.
+
+### Main area, in the order they appear
+
+0. **"🧪 Synthetic workflow demonstration" expander** — always present, regardless of whether
+   real data/checkpoint are configured. "Run synthetic workflow demonstration" button
+   (`synthetic_demo_button`) builds a fixed, fabricated placeholder result and runs it through
+   the *same* evidence-review/human-review/LLM panels described below (widget keys prefixed
+   `synthetic_...`), unmistakably labeled throughout as synthetic. This is what makes the app
+   usable on Railway before any real dataset/checkpoint decision is made (see "Railway
+   deployment readiness").
+1. **Study selector** (`study_select`) — every fully-downloaded, labeled study found under
+   `data_root`.
+2. **"Run trained inference on this study"** button (`run_inference_button`) — loads the
+   checkpoint (cached for the session), decodes the real DICOM series, runs the real forward
+   pass, builds the evidence pipeline's input, and stores the result for the rest of the page.
+3. **Scores panel** — the 12 raw probabilities, as a bar chart and a table, directly under the
+   non-diagnostic disclaimer and any bridge-specific warnings (always shown, never collapsed).
+4. **Checkpoint provenance panel** — SHA-256, architecture string ("bridged, not native"),
+   Lightning epoch/step.
+5. **Evidence review panel** — specialist groups, critic findings, consensus workflow status
+   and required next steps (see table above).
+6. **Human review gate panel** — current state; "Your name/role (actor)" (`real_actor_input`)
+   and "Reason for this action" (`real_reason_input`) text fields; **Approve** / **Request more
+   evidence** / **Escalate** buttons (`real_approve_button` / `real_request_more_evidence_button`
+   / `real_escalate_button`), each disabled once the gate reaches `REVIEWED`. A reason is
+   required — clicking without one shows an error and records nothing. The audit history table
+   below updates immediately and is append-only. (This whole panel, and the two below it, are
+   rendered by one shared function, `render_workflow()`, reused identically — down to the exact
+   same code, not just the same look — by the synthetic demo above, with a `synthetic_` key
+   prefix instead of `real_` so the two never collide on the same page.)
+7. **"Optional LLM interpretation (AI-generated text, unverified — never auto-approved)"
+   panel** — a caption showing the resolved `.env`/environment configuration (provider,
+   whether external calls are allowed, whether a credential is present — never the credential
+   itself); the provider radio described above (`real_llm_provider_choice`); **"Generate LLM
+   interpretation"** button (`real_llm_generate_button`) — shows which provider actually
+   produced the result (local fallback is reported honestly when that's what happened) and the
+   `screen_proposal()` outcome (BLOCKED in red, or QUARANTINED in yellow with the quoted text).
+8. **CPU benchmark evidence panel** — "Benchmark result file" path input
+   (`benchmark_path_input`, defaults to `outputs/amd/benchmark_kaggle_bridge.json`); if that
+   file exists, shows real CPU latency/throughput and the checkpoint's SHA-256; the GPU line
+   always says "not available" honestly unless a real benchmark run on real AMD hardware
+   produced that file — the app only displays a file, it never runs the benchmark itself.
+
+## Running it yourself
+
+```bash
+pip install -r requirements-rsna.txt timm pydicom requests psutil
+cp .env.example .env    # optional -- see "Optional AI-assisted interpretation" above
+```
+
+Set (environment or `.env`): `AMD_KAGGLE_RSNA_ROOT=<real data_root>`,
+`AMD_KAGGLE_CHECKPOINT=<real foldN-knee-mil-best.ckpt>` — or leave both blank and type them
+into the sidebar. Then:
+
+```bash
+streamlit run hackathon/amd/streamlit_app.py
+```
+
+With no `.env` and no environment variables at all, the optional LLM section runs entirely
+local, with no network call and no credential required.
+
+## Validation evidence and limitations — the honest summary
+
+- **Real, verified today:** local CPU inference through the bridged checkpoint on a real DICOM
+  study (reproducible bit-for-bit); the full evidence-review pipeline on that result; the human
+  review-gate state machine and its audit trail; Groq and AMD Token Factory connectivity
+  (synthetic data, each live-verified); 79+28+… mocked failure-mode tests (see "Tests" below).
+- **Not yet done:** no checkpoint compatible with the shared pipeline's *native* architecture
+  (`RSNAKneeCNN`) exists anywhere this project has been developed, so that path has never
+  produced a real-checkpoint prediction. No AMD GPU has been available anywhere in this
+  project's development — every benchmark and inference run so far is CPU-only;
+  `hackathon/amd/rocm_env.py` has only ever reported `amd_gpu_available: false`.
+- **Unconfirmed, flagged rather than hidden:** no official AMD documentation for the "Token
+  Factory" REST contract this adapter calls was ever found; its only evidence of legitimacy is
+  the two successful live calls on this account. The AMD Token Factory *execution* provider
+  (running the model itself on AMD hardware) remains a pure status seam — not the same thing as
+  the AMD Token Factory *LLM reasoning* path above, which works.
+- **A separate experimental architecture** ("Model C0," documented on another branch's Phase 15
+  diagnostics) has its own weak-label AUC numbers against automated labels — not clinical
+  accuracy, not this checkpoint, and not integrated here. See that branch's own documentation,
+  not this one, for those numbers.
+
+## Railway deployment readiness
+
+**Not deployed yet** — this is a readiness assessment and the configuration files it needs,
+not a deployment.
+
+### What now exists in this repository for Railway
+
+| File | Purpose |
+|---|---|
+| `requirements-amd.txt` | Every dependency this app actually imports (directly and transitively — see below), bounded to versions verified in this session. |
+| `Procfile` | `web: streamlit run hackathon/amd/streamlit_app.py --server.port ${PORT} --server.address 0.0.0.0 --server.headless true` — binds to Railway's injected `$PORT`. |
+| `.python-version` | Pins the Python runtime to `3.12`, matching what this app was built and tested against. |
+| `hackathon/amd/synthetic_demo.py` | The synthetic workflow demonstration (see next section) — makes the app fully runnable on Railway **before** any real dataset/checkpoint is bundled. |
+
+**Dependencies actually required to import and run this app** (not fully captured by any single
+pre-existing `requirements*.txt` — now consolidated into `requirements-amd.txt` above):
+`streamlit`, `torch` (CPU build), `pandas`, `numpy`, `pydicom`, `nibabel`, `scikit-learn`,
+`Pillow`, `opencv-python-headless`, `timm`, `requests`, `iterative-stratification` (pulled in
+transitively — `mri_core.agents.contracts` imports `mri_core.rsna_inference_engine`, which
+imports `rsna_knee_inference` → `rsna_knee_train`, which imports `iterstrat` at module level,
+even though nothing on this page trains anything), and optionally `python-dotenv`/`psutil`.
+*Not yet verified: a clean-venv install of `requirements-amd.txt` on a fresh environment — this
+session only confirmed every pinned version matches what's already installed and working here.*
+
+**Correct working directory:** already handled by the app itself, not by deployment
+configuration — `streamlit_app.py` computes the repo root from its own file location
+(`Path(__file__).resolve().parents[2]`) and adds it to `sys.path`, so it resolves its absolute
+imports correctly regardless of Railway's invocation working directory.
+
+### Real inference vs. the synthetic workflow demonstration — now clearly separated
+
+Real trained MRI inference (the "Run trained inference on this study" button) still requires a
+real `data_root` and a real checkpoint — neither of which is deployable yet (see below) — and
+is completely unchanged by anything in this section.
+
+A **new, separate** "🧪 Synthetic workflow demonstration" panel (`hackathon/amd/synthetic_demo.py`)
+lets the rest of the pipeline — evidence review, human review gate, optional LLM
+interpretation — run and be demonstrated with **zero real data or checkpoint required**. It is:
+- Built from a fixed, deterministic placeholder `StudyInferenceResult` (not a forward pass,
+  not randomized — the same values every time), constructed directly from the shared
+  `mri_core.rsna_inference_engine` types, deliberately *not* reusing
+  `agent_bridge_adapter.to_study_inference_result()` (which would have falsely attached a
+  "real externally trained Kaggle checkpoint" warning — a real labeling bug caught and fixed
+  during this session, now a permanent regression test).
+- Unmistakably labeled everywhere it appears: a red disclaimer banner reading "SYNTHETIC
+  WORKFLOW DEMONSTRATION," plus an explicit warning that no real study, checkpoint, or
+  inference was involved.
+- Available always, independent of whether real paths are configured — this is what makes the
+  app demo-able on Railway immediately, before any dataset-authorization decision is made.
+
+### Model checkpoint and dataset availability (the real-inference path only)
+
+Neither the real checkpoint nor the real dataset is in Git (correctly gitignored) or exists in
+any deployable location yet — both live only on this local machine. Railway's filesystem is
+ephemeral by default, so making *real* inference work there needs either a small demo bundle
+baked into the build or a mounted volume populated at deploy time. Sizes actually measured
+locally: the real checkpoint is **~19.5 MB**; the smallest single real downloaded study is
+**~40 MB**; the full local dataset (8 studies) is **~856 MB**. A one-study demo bundle
+(checkpoint + one study's DICOMs + the matching metadata rows) is realistically **50-70 MB** —
+small enough to bake into a container image directly, avoiding a separate volume.
+
+**This still requires your explicit authorization, not just a technical decision:** the
+dataset is Kaggle competition data with its own usage terms; redistributing even one study to a
+third-party host (Railway) is a data-governance decision. Nothing in this session uploaded,
+bundled, or redistributed any real study — the synthetic demo mode above exists specifically so
+that decision does not block getting *something* real deployed first.
+
+**Storage/memory:** `torch` (CPU) + `timm` + `opencv-python-headless` push the installed
+dependency footprint toward several hundred MB; budget for that in the Railway plan's build and
+runtime memory, independent of whichever demo-data bundle size you choose later.
+
+**Startup behavior:** the app does not eagerly load any checkpoint or dataset at import time —
+`st.cache_resource` defers real-checkpoint loading until "Run trained inference" is first
+clicked, and the synthetic path never touches a checkpoint at all — so cold-start time is
+dominated by Python/package import, not model loading.
+
+**Sensitive-data/credential handling:** environment/`.env`-driven throughout, verified to never
+log or display a credential (see "Optional AI-assisted interpretation"). `.env` itself is never
+bundled or committed (confirmed again this session). On Railway, set `LLM_PROVIDER`,
+`LLM_ALLOW_EXTERNAL_CALLS`, and the Groq/AMD credentials as Railway **Variables** — never baked
+into the image, never committed — the same `.env.example` documents every variable needed.
+Leaving `LLM_ALLOW_EXTERNAL_CALLS` unset (or `false`) is the correct default for an initial
+deploy; the app, including the synthetic demo, works completely without it.
+
+**Health check:** Streamlit exposes a built-in health endpoint at `/_stcore/health`, usable as
+Railway's health-check path directly — no custom endpoint needed.
+
+### Deployment checklist
+
+- [ ] Railway service created, connected to this repo/branch.
+- [ ] **Start command:** from `Procfile` (auto-detected) or set explicitly in Railway's service
+      settings: `streamlit run hackathon/amd/streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true`
+- [ ] **Build:** Railway/Nixpacks auto-detects Python via `.python-version`; point its install
+      step at `requirements-amd.txt` (e.g. a custom build command or `NIXPACKS_` config
+      pointing away from the default `requirements.txt`, since this app's needs differ from it).
+- [ ] **Health check path:** `/_stcore/health`.
+- [ ] **Railway Variables set** (never committed): `LLM_PROVIDER=local`,
+      `LLM_ALLOW_EXTERNAL_CALLS=false` to start; add Groq/AMD credentials as Variables only when
+      and if you want the live AI-interpretation layer available on the deployed demo.
+- [ ] **Do not set** `AMD_KAGGLE_RSNA_ROOT`/`AMD_KAGGLE_CHECKPOINT` until a real demo dataset has
+      been authorized and bundled — leaving them unset is exactly what makes the synthetic demo
+      the default experience, which is correct for a first deploy.
+- [ ] Deploy.
+- [ ] **Validate against the live Railway URL** (mirroring what this session validated
+      locally): app loads without error; synthetic demo button works end to end (scores →
+      evidence review → human review actions → optional LLM panel, falling back to local);
+      `/_stcore/health` returns healthy; no credential appears in any rendered page or log.
+- [ ] Only after the above: separately decide on, authorize, and bundle a real demo
+      dataset/checkpoint, then re-validate the real-inference path the same way.
 
 ## Tests
 
 ```bash
-python -m pytest tests/test_amd_adapter.py -q
+python -m pytest tests/test_amd_adapter.py tests/test_amd_kaggle_bridge.py \
+    tests/test_amd_benchmark_kaggle_bridge.py tests/test_amd_agent_bridge_adapter.py \
+    tests/test_amd_providers.py tests/test_amd_review_actions.py tests/test_amd_data_config.py \
+    tests/test_amd_llm_config.py tests/test_amd_llm_providers.py tests/test_amd_streamlit_app.py -v
 ```
 
-Default tests use the shared synthetic checkpoint/DICOM fixtures to check plumbing and output
-structure only; their numbers are not real predictions or benchmarks. To run against real assets:
-`AMD_CHECKPOINT=<last.pt> AMD_RSNA_ROOT=<data/rsna-knee> pytest tests/test_amd_adapter.py`.
+Full repository suite: **597 passed, 60 skipped** (skips are real-asset-gated tests that need
+`AMD_KAGGLE_RSNA_ROOT`/`AMD_KAGGLE_CHECKPOINT` pointing at real local files; they skip cleanly
+without them and all pass when they're set, as in this session).
 
-## Bridged real-checkpoint smoke test (`kaggle_mil_bridge.py`)
+| File | Covers |
+|---|---|
+| `test_amd_adapter.py` | `rocm_env.py` (native benchmark/inference CLIs, synthetic fixtures) |
+| `test_amd_kaggle_bridge.py` | The bridged checkpoint smoke test, real-asset-gated |
+| `test_amd_benchmark_kaggle_bridge.py` | CPU-vs-AMD-GPU benchmark for the bridged checkpoint |
+| `test_amd_agent_bridge_adapter.py` | `StudyInferenceResult` adapter correctness + full orchestrator compatibility |
+| `test_amd_providers.py` | Disabled-by-default, no-network-call execution-provider checks |
+| `test_amd_review_actions.py` | Review-gate state transitions and audit-trail correctness |
+| `test_amd_data_config.py` | `AMD_KAGGLE_*` env/`.env` resolution and path validation |
+| `test_amd_llm_config.py` | LLM env/`.env` resolution, the hard safety gate, provider routing |
+| `test_amd_llm_providers.py` | Groq + AMD Token Factory adapters: success, every failure mode, redaction, no-auto-fallback-to-another-provider |
+| `test_amd_streamlit_app.py` | Full UI, via `streamlit.testing.v1.AppTest`: config, validation errors, inference, review actions, LLM panel |
 
-No checkpoint compatible with `mri_core.rsna_knee_model.RSNAKneeCNN` exists on disk in this
-project. The only real *trained* RSNA knee weights found locally are five
-`foldN-knee-mil-best.ckpt` files from an external Kaggle notebook (`kneeabdet-baseline-v1`) --
-a PyTorch Lightning checkpoint for a `timm efficientnet_b0` backbone with gated attention-MIL
-pooling over DICOM slices, not the native MRNet-style encoder. `hackathon/amd/kaggle_mil_bridge.py`
-is a minimal, inference-only port of that architecture and its exact preprocessing (24 slices,
-224x224, 1st/99th percentile normalization, single-channel ImageNet mean/std) so those real
-weights can be run on a real local study. It does not modify `mri_core`'s own model or checkpoint
-code, and `run_inference.py` is untouched and still only talks to the native architecture.
+## Appendix: native-architecture CLI tools
 
-Needs `timm` and `pydicom` in addition to `requirements-rsna.txt` (`pip install timm pydicom`).
+These predate the Streamlit demo and still work independently of it; kept for reference and
+for anyone who wants the shared engine's *native* `RSNAKneeCNN` path specifically (no checkpoint
+for it currently exists on this machine — see "Validation evidence and limitations").
 
-```bash
-python -m hackathon.amd.run_real_checkpoint_smoke \
-  --data-root <real RSNA knee data_root with raw/train_series/...> \
-  --checkpoint <foldN-knee-mil-best.ckpt> \
-  --out outputs/amd/real_checkpoint_prediction.json
-```
+| Command | Purpose |
+|---|---|
+| `python -m hackathon.amd.rocm_env [--require-amd] [--smi]` | Reports torch/ROCm build, visible devices. `amd_gpu_available` is true only for a real ROCm build with a visible device. |
+| `python -m hackathon.amd.run_inference --data-root D --checkpoint C.pt [--study-uid U] [--device cuda]` | One real study through the shared engine's *native* path. Writes `outputs/amd/prediction.json`. |
+| `python -m hackathon.amd.benchmark --data-root D --checkpoint C.pt [...]` | CPU vs AMD GPU, native path. Writes `outputs/amd/benchmark.json`. |
+| `python -m hackathon.amd.benchmark_kaggle_bridge --data-root D --checkpoint fold0-knee-mil-best.ckpt [...]` | Same CPU-vs-AMD-GPU measurement, for the bridged checkpoint. Writes `outputs/amd/benchmark_kaggle_bridge.json`. |
+| `python -m hackathon.amd.run_real_checkpoint_smoke --data-root D --checkpoint C.ckpt --out OUT.json` | The one-shot bridged-checkpoint smoke test the Streamlit app's "Run inference" button wraps. |
 
-Output (`real_checkpoint_prediction.json`) has three sections: `prediction` (study/series UID,
-plane, 12 sigmoid probabilities, latency), `provenance` (checkpoint path + SHA-256, bridged
-architecture description, Lightning epoch/step), and `non_diagnostic_notice`. The probabilities
-are real forward-pass outputs of real trained weights on a real DICOM series -- not fabricated --
-but this checkpoint has never been evaluated or calibrated by this project, so they carry no
-accuracy claim.
-
-Tests: `tests/test_amd_kaggle_bridge.py`, gated by `AMD_KAGGLE_CHECKPOINT` and
-`AMD_KAGGLE_RSNA_ROOT` (skips cleanly without them, same convention as `AMD_CHECKPOINT`/
-`AMD_RSNA_ROOT` above).
-
-## Bridged benchmark (`benchmark_kaggle_bridge.py`)
-
-Same CPU-vs-AMD-GPU measurement as `benchmark.py`, applied to the bridged checkpoint above
-instead of `RSNAKneeCNN`. A separate module so the native path's tests and behavior cannot
-regress; it reuses only `benchmark.py`'s generic, model-agnostic timing/memory helpers
-(`_sync`, `_summary`, `_process_rss_bytes`), never its model-loading code.
-
-```bash
-python -m hackathon.amd.benchmark_kaggle_bridge \
-  --data-root <real RSNA knee data_root with raw/train_series/...> \
-  --checkpoint <foldN-knee-mil-best.ckpt> \
-  --iterations 50 --warmup 5 --batch-sizes 1 4 \
-  --output outputs/amd/benchmark_kaggle_bridge.json
-```
-
-Same fairness rules as `benchmark.py` (one-time preprocessing, fresh model per device, discarded
-warm-up, `torch.cuda.synchronize()`-bracketed GPU timing, `psutil`-based CPU RSS when installed).
-`gpu.is_amd_rocm` always reflects the real environment check (`rocm_env.check_environment()`),
-never the device string passed in -- a CUDA/MPS accelerator run with `--allow-non-amd` is still
-labeled `is_amd_rocm: false`, and a CPU-only machine's `gpu` block is `{"status": "unavailable",
-"reasons": [...]}` with no numbers at all, never a fabricated GPU result. `workload` includes the
-checkpoint's SHA-256 and the bridged architecture string for provenance.
-
-Tests: `tests/test_amd_benchmark_kaggle_bridge.py` -- always runs (synthetic DICOM fixture +
-untrained-but-correctly-shaped Lightning checkpoint, same convention as `test_amd_adapter.py`'s
-synthetic tests), including two fully mocked tests of the GPU-available code path (`is_amd_rocm`
-true/false wiring) that need no real accelerator.
-
-## Status
-
-- Native-architecture path (`run_inference.py`, `benchmark.py`): the trained fold checkpoints
-  (`outputs/rsna-fivefold-benchmark/...`) for `RSNAKneeCNN` are gitignored and were not found
-  anywhere on this machine; no real-checkpoint prediction through this path has been produced.
-- Bridged path (`kaggle_mil_bridge.py`, above): a real end-to-end run against a real DICOM study
-  and a real externally-trained checkpoint has been produced and is reproducible bit-for-bit
-  across runs (see commit for the exact command and output).
-- Bridged benchmark (`benchmark_kaggle_bridge.py`, above): a real CPU-only run against the same
-  real DICOM study and checkpoint has been produced (batch sizes 1 and 4; `outputs/amd/
-  benchmark_kaggle_bridge.json`). `gpu.status` correctly reports `unavailable` on this machine.
-- No AMD GPU has been available in this environment; `rocm_env.py` has only ever reported
-  `amd_gpu_available: false` with reasons. No AMD GPU benchmark (native or bridged) has been
-  produced. This is the only remaining requirement for a genuine AMD-hosted demo: an actual ROCm
-  environment to run the two commands above (`benchmark.py` once a native checkpoint exists,
-  `benchmark_kaggle_bridge.py` today) unchanged.
-
-## Phase 15 research results (reference only — not integrated into this adapter)
-
-Published upstream on `hackathon/opencv-aws` @ `0a69043` (`docs/phase15_training_health_diagnostics.md`).
-This is **training-health diagnostics for a third, separate experimental architecture**
-("Model C0": ResNet-18 from scratch, 2.5D, attention-MIL, 128px x 9 slices) — not `RSNAKneeCNN`
-(the native path above) and not the bridged Kaggle `efficientnet_b0` attention-MIL checkpoint
-(the bridged path above). Nothing from Phase 15 has been deployed, trained, or submitted here;
-this section only restates what the published diagnostics say, with the distinctions they
-themselves insist on:
-
-- **Training-subset ("overfit") AUC — a sanity check, not a performance number.** A 64-study
-  subset reached fit macro AUC 1.000 after 60 epochs. This is deliberate memorization of the
-  training data used to verify the pipeline is mechanically sound (masks, loss, optimizer, AMP,
-  checkpoint/resume); it says nothing about generalization and must never be read as a model
-  accuracy figure.
-- **Weak-validation AUC — agreement with automated weak labels on a held-out training-only
-  split, not clinical accuracy.** Real labels reach final macro AUC 0.615-0.66 across two seeds
-  and learning rates, against a shuffled-label negative control at 0.516-0.56 (chance). The gap
-  is real but small (about 0.10-0.14 AUC) and was found by looking at the same split that then
-  reported it, so the report itself calls the best learning-rate result "a lead, not a confirmed
-  effect," pending a pre-registered re-run on fresh splits (proposed, not launched).
-- **Clinical performance: not measured, not claimed.** The 58 gold-labeled studies, the Kaggle
-  test images, and the leaderboard were explicitly not touched in Phase 15. The source document
-  states directly: "No clinical claim is made." This adapter adds nothing to that; it cannot and
-  does not claim Phase 15 improves clinical performance.
-- **Weights:** three run exports are hash-verified in the source document (`last.pt`/
-  `last_best.pt` SHA-256 for `overfit64_resume`, `real_e6_s0`, `real_e12_s0`) but, per the
-  project's standing convention, are git-ignored and were not found anywhere on this machine.
-  No Phase 15 weight has been deployed into `hackathon/amd/` by this change, and none will be
-  without a separate, explicit request.
-
-## Interactive demo (Phase 1): `streamlit_app.py`
-
-A local Streamlit app that lets a user pick a real downloaded study, run the bridged Kaggle
-checkpoint on it, and walk the result through the shared evidence-review and human-review
-layers -- all on CPU, with no network call and no credential required.
-
-### Launch
-
-```bash
-pip install -r requirements-rsna.txt timm pydicom psutil
-cp .env.example .env    # optional -- see "Optional LLM reasoning layer" below; safe to skip entirely
-set AMD_KAGGLE_RSNA_ROOT=<real rsna-knee data_root with raw/train_series/...>   # optional, prefills the sidebar
-set AMD_KAGGLE_CHECKPOINT=<foldN-knee-mil-best.ckpt>                            # optional, prefills the sidebar
-streamlit run hackathon/amd/streamlit_app.py
-```
-
-(`set` is PowerShell/cmd; use `export` on bash.) Both paths can also be typed directly into the
-sidebar at runtime -- nothing is hardcoded to a specific machine. If either field is empty the
-app shows an instruction and stops; it never guesses a path or fabricates a result. With no
-`.env` at all, the optional LLM section below runs entirely in local deterministic mode.
-
-### Architecture
-
-```mermaid
-flowchart TD
-    A["mri_core.rsna_integration<br/>(study discovery, unmodified)"] --> B
-    B["hackathon.amd.kaggle_mil_bridge<br/>(checkpoint + forward pass, unmodified)"] --> C
-    C["hackathon.amd.agent_bridge_adapter<br/>(StudyInferenceResult adapter)"] --> D
-    D["mri_core.agents.orchestrator.process_inference_result<br/>(specialist / critic / consensus / review gate, unmodified)"] --> E
-    D --> G
-
-    E["hackathon.amd.review_actions<br/>(approve / request-more-evidence / escalate)"] --> F
-    F["mri_core.agents.review_gate.ReviewGate<br/>(unmodified; human approval, never bypassed)"]
-
-    G["hackathon.amd.llm_config.build_adapter()<br/>(hard gate: LLM_PROVIDER + LLM_ALLOW_EXTERNAL_CALLS=true + credentials)"] --> H
-    G -->|disabled or misconfigured| L
-
-    H{"LLM_PROVIDER"}
-    H -->|groq| I["hackathon.amd.llm_providers.GroqAdapter<br/>(live-verified once, synthetic data)"]
-    H -->|amd_token_factory| J["hackathon.amd.llm_providers.AMDTokenFactoryLLMAdapter<br/>(live-verified once, synthetic data)"]
-    H -->|local / unset| L
-
-    I --> K
-    J --> K
-    L["hackathon.amd.llm_providers.LocalDeterministicAdapter<br/>(always available, no network)"] --> K
-
-    K["mri_core.agents.llm_adapter.screen_proposal()<br/>(unmodified; BLOCKED or QUARANTINED, never 'verified')"] --> M
-    M["Streamlit UI: quarantined LLM panel<br/>(structurally separate from scores / review gate)"]
-
-    D --> N["hackathon.amd.providers<br/>(local execution, default, vs. optional AMD Token Factory execution -- NOT implemented)"]
-    D --> O["outputs/amd/benchmark_kaggle_bridge.json, if present<br/>(CPU benchmark evidence panel)"]
-```
-
-The LLM reasoning layer (G-K) is structurally separate from the review-gate path (E-F): nothing
-produced by an LLM adapter is ever read by `review_actions.py` or `ReviewGate`, and nothing in
-the review-gate path is ever sent to an LLM provider.
-
-### Why an adapter was needed
-
-`mri_core.agents.orchestrator.process_inference_result()` takes exactly one type:
-`mri_core.rsna_inference_engine.StudyInferenceResult`. The bridge's output (see
-`run_real_checkpoint_smoke.py`) is a plain dict, because its checkpoint is architecturally
-foreign to `mri_core`'s own loaders -- the two are not directly compatible. Rather than modify
-`contracts.build_evidence_bundle()` (out of scope: "do not modify the shared mri_core...
-implementation"), `agent_bridge_adapter.py` builds a real `StudyInferenceResult` with a real
-`ModelProvenance` (both imported unchanged from `mri_core.rsna_inference_engine`), so every
-downstream agents-layer module runs completely unmodified on a bridged result. It always
-attaches a warning identifying the checkpoint as bridged/external, so the critic layer's
-`ENGINE_WARNINGS_PRESENT` finding fires and consensus can never report a bridged run as
-evidence-complete. `ModelProvenance.fold` is populated only when the checkpoint filename
-matches the real `foldN-...` convention; any other filename gives `fold=None`, not a guess.
-
-### Human review gate: escalate is not a separate shared state
-
-The shared `ReviewGate` only has three states: `PENDING_REVIEW`, `MORE_EVIDENCE_REQUESTED`,
-`REVIEWED` -- there is no distinct "escalated" state, and adding one to shared `mri_core` code
-is out of scope here. `review_actions.escalate()` therefore transitions to `REVIEWED`, the same
-underlying state `approve()` uses, but always with an audit `reason` prefixed `"ESCALATED: "`
-so the two are distinguishable in the append-only history -- never silently merged. The gate
-never bypasses human approval: every action requires an explicit actor and a non-empty reason,
-validated by the shared `ReviewGate.transition()` itself.
-
-### Optional AMD Token Factory provider
-
-`hackathon/amd/providers.py` adds `AMDTokenFactoryProvider`, disabled by default
-(`enabled=False`). Disabled, it makes no network call and requires no credentials. Even if a
-user checks "Enable AMD Token Factory" in the sidebar and fills in a base URL and API key,
-`status()` reports it as configured but unverified -- there is no real HTTP client behind it
-yet, and `device()` raises `NotImplementedError` rather than pretending to dispatch work to AMD
-hardware. This is the explicit seam for a future real Token Factory integration; nothing here
-claims AMD acceleration that was not measured.
-
-### Optional LLM reasoning layer (`llm_config.py`, `llm_providers.py`)
-
-A second, independent optional section in the same app: an untrusted, free-text "reviewer
-interpretation" of the deterministic evidence above, routed through the shared, unmodified
-`mri_core.agents.llm_adapter.screen_proposal()` (BLOCKED or QUARANTINED -- never "verified")
-and never fed back into consensus, the review gate, or any approval decision.
-
-**Configuration is environment/`.env`-driven, not code.** Copy `.env.example` (repo root) to
-`.env` and set what you need; see that file for all seven variables. With no `.env` and no
-environment variables set, the app runs local-only: no network call, no credential required.
-
-**The hard safety gate** (`llm_config.build_adapter()`): `LLM_ALLOW_EXTERNAL_CALLS` must be
-explicitly `true`, *in addition to* `LLM_PROVIDER` naming that provider and a credential being
-present, before Groq or AMD Token Factory are ever invoked. **An ambient `GROQ_API_KEY` sitting
-in the environment is never, by itself, enough** -- this was a real incident during development
-(a test script accidentally made one live, failed call because a real key happened to already be
-set), and it is now a permanent regression test
-(`test_amd_llm_providers.py::TestAmbientCredentialAloneCannotAuthorize` /
-`test_amd_streamlit_app.py::test_ambient_groq_api_key_alone_does_not_authorize_a_call`).
-
-**Verified live Groq connectivity (synthetic data only, one approved call):** on 2026-10-16,
-one real request through the unmodified `GroqAdapter.propose()` code path, model
-`openai/gpt-oss-20b`, `reasoning_effort=low`, structured `response_format` (`json_schema`,
-strict), returned **HTTP 200 in 1.848s with a valid structured JSON response**. The only input
-was a synthetic, non-medical placeholder (`study_uid="synthetic-smoke-test-not-a-real-study"`,
-placeholder scores, a zeroed fake checkpoint hash) -- no real study, DICOM, patient data, or
-project data of any kind was sent. This confirms the Groq *transport and schema* work; it is
-**not** a validation of the quality, safety, or usefulness of what Groq says about a real study
--- every real result still only ever reaches `QUARANTINED` or `BLOCKED`, never trusted evidence.
-
-**Mock-tested failure handling** (no live call needed to verify, re-run anytime):
-`GroqAdapter` is tested against a missing credential, request timeout, connection error, every
-Groq HTTP error status, invalid/non-JSON response bodies, 8 variants of a malformed or
-schema-violating structured response, and a reasoning model returning its hidden `reasoning`
-field with an empty `content` (the real failure `llama-3.3-70b-versatile` produced before the
-model/schema fix below) -- every case cleanly raises `LLMProviderUnavailableError` and falls
-back to `LocalDeterministicAdapter` via `propose_with_fallback()`, never crashing the app.
-
-**Why the model changed from `llama-3.3-70b-versatile` to `openai/gpt-oss-20b`:** the former
-returned HTTP 404 ("does not exist or you do not have access to it") for the real key tested
-here, despite being listed as a current production model in Groq's docs -- availability can be
-account/tier-specific. The latter is a reasoning model; without a structured `response_format`
-it could spend its whole token budget on hidden reasoning and leave `message.content` empty,
-which the adapter correctly rejected rather than ever substituting the `reasoning` field as the
-answer. Requesting strict JSON-schema output (`{"summary": str}`) fixed this.
-
-**AMD Token Factory LLM reasoning: implemented and verified live, exactly once, with synthetic
-data.** `AMDTokenFactoryLLMAdapter.propose()` makes a real `POST {base_url}/chat/completions`
-request -- the same shape as `GroqAdapter`, using `response_format={"type": "json_object"}`
-(not Groq's strict `json_schema`, per the verified contract), `reasoning_effort=low`, and the
-same strict `{"summary": str}` content validation (`reasoning` is never read as the answer).
-
-*Verified live connectivity (synthetic data only, one authorized call, 2026-10-16):* base URL
-`https://developer.amd.com.cn/radeon/api/v1`, model `Qwen3.8-27B`, `Authorization: Bearer
-<key>` -- returned **HTTP 200 in 4.331s**, `finish_reason: stop`, a valid JSON
-`choices[0].message.content`, and real rate-limit headers (`x-ratelimit-limit-user-rpm: 20`,
-`x-ratelimit-limit-user-daily-usd: 1` -- this account is metered at $1.00/day). The response's
-own `model` field was `self-dploy/Qwen3.8-27B`, confirming a real backend answered. As with
-Groq, this confirms *transport and schema* only, with an entirely synthetic, non-medical
-payload (`study_uid="synthetic-smoke-test-not-a-real-study"`) -- it is not a validation of
-response quality against real evidence, and every real result still only ever reaches
-`QUARANTINED` or `BLOCKED`.
-
-*A caveat worth stating plainly:* no official AMD documentation for this "Token Factory" REST
-contract was ever found during development -- the only publicly documented "Token Factory" API
-found belongs to a different company (Nebius). The live test above is the only evidence this
-specific base URL/contract is real; treat it as account-specific until corroborated elsewhere.
-
-*A second, full end-to-end live call (one authorized synthetic test, 18.14s, HTTP 200) went
-through the real `redact_for_external_llm()` → `AMDTokenFactoryLLMAdapter.propose()` →
-`screen_proposal()` path with a synthetic `StudyInferenceResult` -- confirmed no identifying
-data in the outbound payload, a valid structured `RawProposal`, and the human review gate
-(`PENDING_REVIEW`) unchanged before and after. The response came back **BLOCKED**: the model
-produced a 619-character summary, over `mri_core.agents.llm_adapter`'s own 500-character
-`MAX_PROPOSAL_LENGTH` cap -- `screen_proposal()` did exactly its job. Fix: the shared system
-prompt (`_SYSTEM_PROMPT`, used by both Groq and AMD) now explicitly asks for one sentence under
-350 characters, and `_extract_structured_summary()` enforces that same 500-character cap itself
-(imported from `mri_core.agents.llm_adapter.MAX_PROPOSAL_LENGTH`, not a separate magic number)
--- an oversized response is now rejected with a specific `LLMProviderUnavailableError` before
-ever reaching `screen_proposal()`, rather than arriving there and coming back opaquely BLOCKED.
-`screen_proposal()` itself was not touched, loosened, or bypassed.*
-
-*Requires all four* `AMD_TOKENFACTORY_ENABLED`/`_BASE_URL`/`_API_KEY`/`_MODEL`, independently
-checked -- a partial configuration always falls back to `LocalDeterministicAdapter` via
-`build_adapter()`, before `AMDTokenFactoryLLMAdapter` is even constructed with real credentials.
-An AMD failure (bad credentials, rate limit, timeout, malformed response, etc.) never
-automatically tries Groq -- `propose_with_fallback()`'s default fallback is always
-`LocalDeterministicAdapter`, confirmed by
-`test_amd_llm_providers.py::TestAMDNeverAutoFallsBackToAnotherExternalProvider`.
-
-*Mock-tested failure handling* (no live call needed, re-run anytime): missing/partial
-credentials, HTTP 401/403 (invalid credentials), 429 (rate limit), 400/404 (possibly
-unsupported model), other HTTP errors, timeout, connection error, invalid JSON, 8 variants of
-malformed/unexpected structured-response schema, an oversized summary, and the reasoning-field
-trap -- all raise `LLMProviderUnavailableError` and fall back cleanly, never crashing the app.
-
-**No AMD GPU acceleration has been demonstrated anywhere in this adapter** -- not for the LLM
-layer (Groq's own inference hardware is irrelevant to this project's AMD claim) and not for
-model inference/benchmarking (see "Status" below). All of this remains research-prototype,
-non-diagnostic software; nothing in this section produces or implies a clinical finding.
-
-Tests: `tests/test_amd_llm_config.py` (31), `tests/test_amd_llm_providers.py` (79) -- both
-always run, fully offline/mocked.
-
-### Dependencies
-
-Same as the bridged smoke test above (`requirements-rsna.txt`, `timm`, `pydicom`), plus
-`streamlit` (already in `requirements.txt`), `requests` (already in `requirements.txt`),
-optionally `python-dotenv` for `.env` file support (`llm_config.py` degrades gracefully without
-it -- real environment variables still work), and optionally `psutil` for CPU memory reporting
-in the benchmark panel.
-
-### Tests
-
-```bash
-python -m pytest tests/test_amd_agent_bridge_adapter.py tests/test_amd_providers.py \
-    tests/test_amd_review_actions.py tests/test_amd_llm_config.py tests/test_amd_llm_providers.py \
-    tests/test_amd_streamlit_app.py -v
-```
-
-- `test_amd_agent_bridge_adapter.py` -- adapter correctness and full orchestrator compatibility.
-- `test_amd_providers.py` -- disabled-by-default, no-network-call, no-fabricated-AMD-claim checks
-  (including a socket-construction guard asserting the disabled/unconfigured provider never
-  opens a real connection).
-- `test_amd_review_actions.py` -- state-transition and audit-trail correctness, independent of
-  the UI.
-- `test_amd_streamlit_app.py` -- `streamlit.testing.v1.AppTest`-driven: the no-config path always
-  runs; the full pipeline (inference -> review actions -> audit trail -> benchmark panel) is
-  gated behind `AMD_KAGGLE_CHECKPOINT`/`AMD_KAGGLE_RSNA_ROOT`, same convention as
-  `test_amd_kaggle_bridge.py`.
-
-### Known limitations
-
-- The deterministic image-quality gate (`mri_core.decision`) has never been run against the
-  bridge's own preprocessing, so `quality_gate_status` is always `NOT_ASSESSED`; consensus
-  therefore always reports `MORE_EVIDENCE_REQUIRED` for a bridged result, never
-  `EVIDENCE_COMPLETE_FOR_RESEARCH_REVIEW`. This is intentional honesty, not a bug to silence.
-- "Escalate" and "Approve" share one underlying terminal state in the shared `ReviewGate` (see
-  above) -- they are distinguished only in the audit reason/actor, not by a separate state.
-- The benchmark panel only displays a file already produced by `benchmark_kaggle_bridge.py`; the
-  app itself does not run the benchmark.
-- The AMD Token Factory provider is a UI/status seam only; it cannot actually run inference on
-  AMD cloud hardware yet.
-- `st.cache_resource` caches the loaded model per checkpoint path for the life of the Streamlit
-  session; restart the app (not just rerun) after replacing a checkpoint file at the same path.
-- Groq and AMD Token Factory LLM connectivity have each been verified live exactly once, with
-  synthetic non-medical data only (see "Optional LLM reasoning layer" above) -- this confirms
-  the transport and schema work for each, not the quality or safety of what either provider
-  would say about a real study's evidence.
-- No official AMD documentation for the Token Factory REST contract used above was ever found;
-  its legitimacy rests on the one live test succeeding, not on a published AMD API reference.
-- The AMD Token Factory *LLM reasoning* adapter (`llm_providers.AMDTokenFactoryLLMAdapter`) is
-  now implemented and live-verified; this is separate from the AMD Token Factory *execution*
-  provider (`providers.AMDTokenFactoryProvider`, for running model inference on AMD hardware),
-  which remains an unimplemented status-only seam (see above) -- the two were never the same
-  thing, and only the first one works today.
+Benchmark methodology: preprocessing happens once and the identical tensors go to every device
+(preprocessing time reported separately); warm-up iterations are discarded; GPU timing is
+bracketed by `torch.cuda.synchronize()`; with no AMD GPU, the `gpu` block says `unavailable`
+with reasons and contains no numbers — speed only, never an accuracy or clinical claim.
