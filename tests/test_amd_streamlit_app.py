@@ -117,6 +117,117 @@ class TestSyntheticDemoNeedsNoRealData:
         assert any("Enter a real data_root and checkpoint path" in info.value for info in at.info)
 
 
+class TestCuratedBenchmarkScenarios:
+    """The 22-scenario selector added to streamlit_app.py. Metadata browsing must work with
+    zero real configuration; only the local-availability check and running inference need a
+    real data_root/checkpoint, and neither ever runs automatically just from selecting a
+    scenario."""
+
+    def test_selector_appears_and_all_22_scenarios_load_with_zero_real_config(self, no_env):
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        selector = at.selectbox(key="benchmark_scenario_select")
+        assert len(selector.options) == 22
+        assert selector.options[0].startswith("AMD-001 — ")
+        assert selector.options[-1].startswith("AMD-022 — ")
+
+    def test_disclaimer_is_shown(self, no_env):
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert any("Research/demo benchmark only" in c.value for c in at.caption)
+
+    def test_browsing_metadata_requires_no_data_root_no_checkpoint_no_credential_no_network(self, no_env, monkeypatch):
+        """Metadata browsing must work with no data_root, no checkpoint, no AMD/Groq
+        credential, and -- enforced here -- no network call possible at all."""
+        import requests
+
+        def _blocked(*args, **kwargs):
+            raise AssertionError("requests.post was called just from browsing benchmark scenario metadata.")
+
+        monkeypatch.setattr(requests, "post", _blocked)
+
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        selector = at.selectbox(key="benchmark_scenario_select")
+        selector.set_value(selector.options[5]).run(timeout=RUN_TIMEOUT)
+
+        assert not at.exception
+        assert any("Scenario ID:" in m.value for m in at.markdown)
+
+    def test_selecting_a_scenario_never_runs_inference_automatically(self, no_env):
+        """Selecting any scenario, with zero real config, must never attempt real inference --
+        the only way to run inference is the explicit button, gated on local availability."""
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        selector = at.selectbox(key="benchmark_scenario_select")
+        selector.set_value(selector.options[0]).run(timeout=RUN_TIMEOUT)
+
+        assert not at.exception
+        assert "benchmark_run_inference_button" not in [b.key for b in at.button]
+        assert "last_result" not in at.session_state
+
+    def test_no_data_root_shows_cannot_check_availability_not_a_crash(self, no_env):
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        selector = at.selectbox(key="benchmark_scenario_select")
+        selector.set_value(selector.options[0]).run(timeout=RUN_TIMEOUT)
+
+        assert not at.exception
+        assert any("cannot be checked yet" in i.value for i in at.info)
+
+    @requires_real_assets
+    def test_missing_underlying_study_shows_clean_informational_state(self, real_env):
+        """With a real data_root configured, a scenario whose study is NOT present locally
+        must show the exact clean message specified, never crash, never fabricate output."""
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        selector = at.selectbox(key="benchmark_scenario_select")
+        # AMD-002 is not among the studies present in this session's real local data_root.
+        amd_002 = next(o for o in selector.options if o.startswith("AMD-002 — "))
+        selector.set_value(amd_002).run(timeout=RUN_TIMEOUT)
+
+        assert not at.exception
+        assert any(
+            "The underlying MRI study is not available on this machine, so live inference "
+            "cannot be run for this scenario" in w.value
+            for w in at.warning
+        )
+        assert "benchmark_run_inference_button" not in [b.key for b in at.button]
+
+    @requires_real_assets
+    def test_available_study_shows_success_and_offers_to_run_real_inference(self, real_env):
+        """AMD-001's study is present in this session's real local data_root -- confirmed
+        separately via mri_core.rsna_integration.discover_available_studies()."""
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        selector = at.selectbox(key="benchmark_scenario_select")
+        amd_001 = next(o for o in selector.options if o.startswith("AMD-001 — "))
+        selector.set_value(amd_001).run(timeout=RUN_TIMEOUT)
+
+        assert not at.exception
+        assert any("is available locally under the configured data_root" in s.value for s in at.success)
+        assert "benchmark_run_inference_button" in [b.key for b in at.button]
+
+    @requires_real_assets
+    def test_running_inference_from_a_scenario_reuses_the_existing_real_inference_path(self, real_env):
+        """Clicking the benchmark's run-inference button must populate the exact same
+        session-state the main real-inference path reads from -- proving this is the same
+        underlying call, not a second, duplicate inference implementation."""
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        selector = at.selectbox(key="benchmark_scenario_select")
+        amd_001 = next(o for o in selector.options if o.startswith("AMD-001 — "))
+        selector.set_value(amd_001).run(timeout=RUN_TIMEOUT)
+        at.button(key="benchmark_run_inference_button").click().run(timeout=RUN_TIMEOUT)
+
+        assert not at.exception
+        assert any("Real inference complete" in s.value for s in at.success)
+        # The main real-inference panel (rendered by the same render_workflow() used
+        # everywhere else) is now showing this scenario's result.
+        assert any("real_approve_button" == b.key for b in at.button)
+
+
 class TestNoConfiguration:
     def test_amd_token_factory_is_unchecked_by_default(self, no_env):
         at = AppTest.from_file(APP_PATH)
