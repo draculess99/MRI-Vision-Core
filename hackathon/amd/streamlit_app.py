@@ -56,6 +56,42 @@ from mri_core.agents.review_gate import InvalidTransitionError, ReviewGate, Stal
 
 st.set_page_config(page_title="MRI-Vision-Core — AMD bridged demo", layout="wide")
 
+# Cosmetic only -- makes the curated-benchmark scenario selector stand out for screenshots/
+# video. Scoped to the `.st-key-benchmark_scenario_selector` container (via st.container(key=...),
+# which Streamlit renders as that exact CSS class) so this never touches the real-study selectbox
+# or any other widget on the page. Yellow outline only -- no colored fill -- per direct feedback;
+# the dropdown listbox/options below could not be scoped the same way (Streamlit/BaseWeb renders
+# the open popup outside this container's DOM subtree), so that part is necessarily global.
+st.markdown(
+    """
+    <style>
+    .st-key-benchmark_scenario_selector div[data-baseweb="select"] > div {
+        min-height: 64px !important;
+        border: 3px solid #f5c518 !important;
+        border-radius: 10px !important;
+        font-size: 18px !important;
+        font-weight: 600 !important;
+    }
+    .st-key-benchmark_scenario_selector div[data-baseweb="select"] span {
+        font-size: 18px !important;
+        font-weight: 600 !important;
+    }
+    div[role="listbox"] {
+        border: 3px solid #f5c518 !important;
+    }
+    div[role="option"] {
+        min-height: 56px !important;
+        font-size: 17px !important;
+        padding: 14px 14px !important;
+    }
+    div[role="option"]:hover {
+        background-color: #4a3f10 !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # --------------------------------------------------------------------------------- helpers
 
@@ -343,12 +379,15 @@ except BenchmarkScenarioError as exc:
     st.error(f"Could not load benchmark scenarios: {exc}")
 else:
     scenario_labels = build_labels(scenario_set)
-    selected_scenario_label = st.selectbox(
-        "Select a curated benchmark scenario", scenario_labels, key="benchmark_scenario_select",
-        help="22 real RSNA knee studies, each chosen for a specific presentation pattern. "
-             "Browsing this list never requires a configured data_root, checkpoint, API key, "
-             "or network connection -- it only reads benchmarks/amd/amd_demo_scenarios.json.",
-    )
+    st.markdown("### 🧪 Select a curated MRI benchmark scenario")
+    with st.container(key="benchmark_scenario_selector"):
+        selected_scenario_label = st.selectbox(
+            "Select a curated benchmark scenario", scenario_labels, key="benchmark_scenario_select",
+            label_visibility="collapsed",
+            help="22 real RSNA knee studies, each chosen for a specific presentation pattern. "
+                 "Browsing this list never requires a configured data_root, checkpoint, API key, "
+                 "or network connection -- it only reads benchmarks/amd/amd_demo_scenarios.json.",
+        )
     selected_scenario = scenario_set.scenarios[scenario_labels.index(selected_scenario_label)]
 
     col_scenario_meta, col_scenario_labels = st.columns(2)
