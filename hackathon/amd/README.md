@@ -310,12 +310,62 @@ streamlit run hackathon/amd/streamlit_app.py
 With no `.env` and no environment variables at all, the optional LLM section runs entirely
 local, with no network call and no credential required.
 
+## Reproducible 22-scenario benchmark
+
+A reproducible runner (`scripts/run_amd_benchmark.py`, implemented in
+`hackathon/amd/benchmark_runner.py`) walks all **22 curated RSNA MRI scenarios**
+(`benchmarks/amd/amd_demo_scenarios.json` — the same set the Streamlit app's "Curated MRI
+Benchmark Scenarios" selector uses) and, for each one, checks whether its underlying study is
+present under the configured `data_root` before running anything. A scenario whose study is not
+available locally is recorded as unavailable and **never assigned a fabricated prediction**; a
+scenario that fails during inference is recorded as a failure and the run continues with the
+rest. Metrics are computed only over scenarios that were actually, successfully inferred.
+
+```bash
+python scripts/run_amd_benchmark.py --dry-run   # check local availability only, no inference
+python scripts/run_amd_benchmark.py             # run real inference where the study is available
+```
+
+Full results: [`benchmarks/amd/results/amd_benchmark_latest.md`](../../benchmarks/amd/results/amd_benchmark_latest.md)
+(README-ready) and [`amd_benchmark_latest.json`](../../benchmarks/amd/results/amd_benchmark_latest.json)
+(machine-readable; per-scenario results, per-target metrics, checkpoint/environment provenance).
+
+**Latest run on this machine, with all 22 underlying studies present locally:**
+
+- 22/22 scenarios available locally, **22/22 successfully inferred**, 0 unavailable, 0 failed
+  (**100% inference coverage**)
+- Macro ROC-AUC: **0.599** · Macro PR-AUC: **0.485** (12 valid targets each)
+- Mean latency: **0.987s** · Median latency: **0.961s** · Total wall time: **21.723s**
+
+Per-target ROC-AUC, honestly reported — some targets separate well, several do not:
+
+| Stronger | ROC-AUC | | Weaker | ROC-AUC |
+|---|---|---|---|---|
+| Synovitis | 0.752 | | PF OA | 0.324 |
+| Medial OA | 0.736 | | ACL | 0.419 |
+| Fracture | 0.695 | | MCL | 0.458 |
+| Lateral Meniscus | 0.671 | | | |
+| Baker's | 0.667 | | | |
+
+These are research benchmark results for the specific externally trained checkpoint currently
+bridged into this app (see "The data and the model" above) — not a statement about the
+underlying clinical task in general, and not a result for any other model or checkpoint.
+Probabilities are raw, uncalibrated sigmoid outputs; this benchmark is not clinical validation.
+When fewer studies are available locally, the runner explicitly reports a metric as **not
+computable** or **insufficient local sample size** with the reason, rather than printing a
+number computed from too few examples (see the runner's own gating logic and
+`tests/test_amd_benchmark_runner.py`).
+
+*Research/demo benchmark only; not clinical accuracy or medical performance.*
+
 ## Validation evidence and limitations — the honest summary
 
 - **Real, verified today:** local CPU inference through the bridged checkpoint on a real DICOM
   study (reproducible bit-for-bit); the full evidence-review pipeline on that result; the human
   review-gate state machine and its audit trail; Groq and AMD Token Factory connectivity
-  (synthetic data, each live-verified); 79+28+… mocked failure-mode tests (see "Tests" below).
+  (synthetic data, each live-verified); a reproducible automated benchmark across all 22
+  curated scenarios (see "Reproducible 22-scenario benchmark" above); 79+28+… mocked
+  failure-mode tests (see "Tests" below).
 - **Not yet done:** no checkpoint compatible with the shared pipeline's *native* architecture
   (`RSNAKneeCNN`) exists anywhere this project has been developed, so that path has never
   produced a real-checkpoint prediction. No AMD GPU has been available anywhere in this

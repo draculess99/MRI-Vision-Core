@@ -388,7 +388,7 @@ def render_markdown(report: dict) -> str:
         "",
         f"*{report['disclaimer']}*",
         "",
-        f"Run: `{report['benchmark_run_id']}`  ·  scenario set: `{report['scenario_set']}`  ·  "
+        f"Run: `{report['benchmark_run_id']}`  |  scenario set: `{report['scenario_set']}`  |  "
         f"schema: `{report['schema_version']}`",
         "",
         "## Coverage",
@@ -404,7 +404,7 @@ def render_markdown(report: dict) -> str:
         "",
         "## Model ranking / classification metrics",
         "",
-        f"Threshold: `{performance['threshold']}`  ·  denominator: "
+        f"Threshold: `{performance['threshold']}`  |  denominator: "
         f"**{coverage['successfully_inferred_scenarios']}** successfully-inferred scenario(s).",
         "",
     ]
