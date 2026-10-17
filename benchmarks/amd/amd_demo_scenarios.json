@@ -1,0 +1,1151 @@
+{
+  "schema_version": "1.0",
+  "scenario_set": "amd_mri_core_demo_v1",
+  "scenario_count": 22,
+  "disclaimer": "Research/demo benchmark only; not clinical accuracy or medical performance.",
+  "selection_method": "deterministic greedy diversity selection: target anchors (12), high multilabel (2), low label count (1), structural outliers (2), farthest-point label+structure diversity (5); ties broken by study ID; see benchmarks/amd/README.md",
+  "targets": [
+    "ACL",
+    "MCL",
+    "Medial Meniscus",
+    "Lateral Meniscus",
+    "Medial OA",
+    "Lateral OA",
+    "PF OA",
+    "Effusion",
+    "Synovitis",
+    "Baker's",
+    "Contusion",
+    "Fracture"
+  ],
+  "data_source": "RSNA Knee Abnormality Detection",
+  "scenarios": [
+    {
+      "scenario_id": "AMD-001",
+      "study_id": "1.2.826.0.1.3680043.8.498.11287937729196958426538087439102017580",
+      "title": "Effusion-focused / isolated finding",
+      "scenario_type": "target_anchor",
+      "selection_step": "target_anchor:Effusion",
+      "tags": [
+        "low_label_count",
+        "target_anchor"
+      ],
+      "presentation_tag": "Simple",
+      "positive_targets": [
+        "Effusion"
+      ],
+      "positive_target_count": 1,
+      "negative_target_count": 11,
+      "label_vector": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0
+      ],
+      "series_count": 5,
+      "dicom_count": 113,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 1,
+        "Sagittal": 3
+      },
+      "fluid_sensitive_series": 4,
+      "fat_suppressed_series": 4,
+      "why_selected": "Coverage anchor for Effusion: the most focused unselected study positive for it (1 positive target).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for Effusion. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-002",
+      "study_id": "1.2.826.0.1.3680043.8.498.69392348385274125385290015404144639002",
+      "title": "PF OA-focused / isolated finding",
+      "scenario_type": "target_anchor",
+      "selection_step": "target_anchor:PF OA",
+      "tags": [
+        "low_label_count",
+        "target_anchor"
+      ],
+      "presentation_tag": "Simple",
+      "positive_targets": [
+        "PF OA"
+      ],
+      "positive_target_count": 1,
+      "negative_target_count": 11,
+      "label_vector": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "series_count": 6,
+      "dicom_count": 114,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 2,
+        "Coronal": 2,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 4,
+      "fat_suppressed_series": 4,
+      "why_selected": "Coverage anchor for PF OA: the most focused unselected study positive for it (1 positive target).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for PF OA. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-003",
+      "study_id": "1.2.826.0.1.3680043.8.498.94433753471890306108089557761231739312",
+      "title": "Baker's-focused / isolated finding",
+      "scenario_type": "target_anchor",
+      "selection_step": "target_anchor:Baker's",
+      "tags": [
+        "low_label_count",
+        "structural_diversity",
+        "target_anchor"
+      ],
+      "presentation_tag": "Simple",
+      "positive_targets": [
+        "Baker's"
+      ],
+      "positive_target_count": 1,
+      "negative_target_count": 11,
+      "label_vector": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "series_count": 4,
+      "dicom_count": 135,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 1,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Coverage anchor for Baker's: the most focused unselected study positive for it (1 positive target).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for Baker's. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-004",
+      "study_id": "1.2.826.0.1.3680043.8.498.54977581323931277817074741182670080450",
+      "title": "Lateral meniscus-focused / isolated finding",
+      "scenario_type": "target_anchor",
+      "selection_step": "target_anchor:Lateral Meniscus",
+      "tags": [
+        "low_label_count",
+        "target_anchor"
+      ],
+      "presentation_tag": "Simple",
+      "positive_targets": [
+        "Lateral Meniscus"
+      ],
+      "positive_target_count": 1,
+      "negative_target_count": 11,
+      "label_vector": [
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "series_count": 5,
+      "dicom_count": 160,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 2,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Coverage anchor for Lateral Meniscus: the most focused unselected study positive for it (1 positive target).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for Lateral Meniscus. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-005",
+      "study_id": "1.2.826.0.1.3680043.8.498.12978510157202852202776899910529174803",
+      "title": "Fracture-focused / isolated finding",
+      "scenario_type": "target_anchor",
+      "selection_step": "target_anchor:Fracture",
+      "tags": [
+        "low_label_count",
+        "target_anchor"
+      ],
+      "presentation_tag": "Simple",
+      "positive_targets": [
+        "Fracture"
+      ],
+      "positive_target_count": 1,
+      "negative_target_count": 11,
+      "label_vector": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1
+      ],
+      "series_count": 6,
+      "dicom_count": 176,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 2,
+        "Sagittal": 3
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Coverage anchor for Fracture: the most focused unselected study positive for it (1 positive target).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for Fracture. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-006",
+      "study_id": "1.2.826.0.1.3680043.8.498.27437263843446879932281897446100134924",
+      "title": "Medial meniscus-focused / isolated finding",
+      "scenario_type": "target_anchor",
+      "selection_step": "target_anchor:Medial Meniscus",
+      "tags": [
+        "low_label_count",
+        "target_anchor"
+      ],
+      "presentation_tag": "Simple",
+      "positive_targets": [
+        "Medial Meniscus"
+      ],
+      "positive_target_count": 1,
+      "negative_target_count": 11,
+      "label_vector": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "series_count": 7,
+      "dicom_count": 189,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 3,
+        "Coronal": 2,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Coverage anchor for Medial Meniscus: the most focused unselected study positive for it (1 positive target).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for Medial Meniscus. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-007",
+      "study_id": "1.2.826.0.1.3680043.8.498.48348615349418615469875801439348424274",
+      "title": "MCL-focused / isolated finding",
+      "scenario_type": "target_anchor",
+      "selection_step": "target_anchor:MCL",
+      "tags": [
+        "low_label_count",
+        "target_anchor"
+      ],
+      "presentation_tag": "Simple",
+      "positive_targets": [
+        "MCL"
+      ],
+      "positive_target_count": 1,
+      "negative_target_count": 11,
+      "label_vector": [
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "series_count": 5,
+      "dicom_count": 189,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 2,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Coverage anchor for MCL: the most focused unselected study positive for it (1 positive target).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for MCL. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-008",
+      "study_id": "1.2.826.0.1.3680043.8.498.12448079646359892252441208258836556945",
+      "title": "Synovitis-focused / low-complexity",
+      "scenario_type": "target_anchor",
+      "selection_step": "target_anchor:Synovitis",
+      "tags": [
+        "low_label_count",
+        "target_anchor"
+      ],
+      "presentation_tag": "Simple",
+      "positive_targets": [
+        "PF OA",
+        "Synovitis"
+      ],
+      "positive_target_count": 2,
+      "negative_target_count": 10,
+      "label_vector": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        1,
+        0,
+        0,
+        0
+      ],
+      "series_count": 6,
+      "dicom_count": 114,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 2,
+        "Coronal": 2,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 4,
+      "fat_suppressed_series": 4,
+      "why_selected": "Coverage anchor for Synovitis: the most focused unselected study positive for it (2 positive targets).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for PF OA, Synovitis. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-009",
+      "study_id": "1.2.826.0.1.3680043.8.498.26790702379506190936834447203448882465",
+      "title": "Contusion-focused / low-complexity",
+      "scenario_type": "target_anchor",
+      "selection_step": "target_anchor:Contusion",
+      "tags": [
+        "low_label_count",
+        "structural_diversity",
+        "target_anchor"
+      ],
+      "presentation_tag": "Simple",
+      "positive_targets": [
+        "ACL",
+        "Contusion"
+      ],
+      "positive_target_count": 2,
+      "negative_target_count": 10,
+      "label_vector": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0
+      ],
+      "series_count": 4,
+      "dicom_count": 114,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 1,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Coverage anchor for Contusion: the most focused unselected study positive for it (2 positive targets).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for ACL, Contusion. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-010",
+      "study_id": "1.2.826.0.1.3680043.8.498.11771393824519892797114773408583976756",
+      "title": "Minimal findings (2 positive targets)",
+      "scenario_type": "low_label_count",
+      "selection_step": "low_label_count",
+      "tags": [
+        "low_label_count"
+      ],
+      "presentation_tag": "Simple",
+      "positive_targets": [
+        "MCL",
+        "Contusion"
+      ],
+      "positive_target_count": 2,
+      "negative_target_count": 10,
+      "label_vector": [
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0
+      ],
+      "series_count": 5,
+      "dicom_count": 122,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 1,
+        "Sagittal": 3
+      },
+      "fluid_sensitive_series": 4,
+      "fat_suppressed_series": 4,
+      "why_selected": "The lowest-complexity remaining study (2 positive targets), a clear baseline for the demo.",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for MCL, Contusion. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-011",
+      "study_id": "1.2.826.0.1.3680043.8.498.11382021393803389951964005983002209238",
+      "title": "ACL-focused / low-complexity",
+      "scenario_type": "target_anchor",
+      "selection_step": "target_anchor:ACL",
+      "tags": [
+        "low_label_count",
+        "structural_diversity",
+        "target_anchor"
+      ],
+      "presentation_tag": "Simple",
+      "positive_targets": [
+        "ACL",
+        "Medial Meniscus"
+      ],
+      "positive_target_count": 2,
+      "negative_target_count": 10,
+      "label_vector": [
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "series_count": 9,
+      "dicom_count": 233,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 2,
+        "Coronal": 4,
+        "Sagittal": 3
+      },
+      "fluid_sensitive_series": 5,
+      "fat_suppressed_series": 5,
+      "why_selected": "Coverage anchor for ACL: the most focused unselected study positive for it (2 positive targets).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for ACL, Medial Meniscus. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-012",
+      "study_id": "1.2.826.0.1.3680043.8.498.78512215519177850923279235346968676828",
+      "title": "Medial OA-focused / low-complexity",
+      "scenario_type": "target_anchor",
+      "selection_step": "target_anchor:Medial OA",
+      "tags": [
+        "target_anchor"
+      ],
+      "presentation_tag": "Simple",
+      "positive_targets": [
+        "Medial Meniscus",
+        "Medial OA",
+        "PF OA"
+      ],
+      "positive_target_count": 3,
+      "negative_target_count": 9,
+      "label_vector": [
+        0,
+        0,
+        1,
+        0,
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "series_count": 6,
+      "dicom_count": 191,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 3,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Coverage anchor for Medial OA: the most focused unselected study positive for it (3 positive targets).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for Medial Meniscus, Medial OA, PF OA. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-013",
+      "study_id": "1.2.826.0.1.3680043.8.498.17844546765907321649997094867791102711",
+      "title": "Structural outlier / 9 series, 572 images",
+      "scenario_type": "structural_diversity",
+      "selection_step": "structural_diversity",
+      "tags": [
+        "structural_diversity"
+      ],
+      "presentation_tag": "Outlier",
+      "positive_targets": [
+        "ACL",
+        "Effusion",
+        "Fracture"
+      ],
+      "positive_target_count": 3,
+      "negative_target_count": 9,
+      "label_vector": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1
+      ],
+      "series_count": 9,
+      "dicom_count": 572,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 3,
+        "Sagittal": 5
+      },
+      "fluid_sensitive_series": 5,
+      "fat_suppressed_series": 5,
+      "why_selected": "Structurally distant from the rest of the set (9 series, 572 DICOM files, plane pattern 1/3/5).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for ACL, Effusion, Fracture. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-014",
+      "study_id": "1.2.826.0.1.3680043.8.498.77362718298550276679350855963451855003",
+      "title": "Lateral OA-focused / multi-finding",
+      "scenario_type": "target_anchor",
+      "selection_step": "target_anchor:Lateral OA",
+      "tags": [
+        "target_anchor"
+      ],
+      "presentation_tag": "Focused",
+      "positive_targets": [
+        "Lateral OA",
+        "Effusion",
+        "Synovitis",
+        "Contusion"
+      ],
+      "positive_target_count": 4,
+      "negative_target_count": 8,
+      "label_vector": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0
+      ],
+      "series_count": 7,
+      "dicom_count": 180,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 3,
+        "Coronal": 2,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Coverage anchor for Lateral OA: the most focused unselected study positive for it (4 positive targets).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for Lateral OA, Effusion, Synovitis, Contusion. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-015",
+      "study_id": "1.2.826.0.1.3680043.8.498.75187434248356774277526985329346125190",
+      "title": "Distinct label pattern / ACL, Medial meniscus, PF OA +3",
+      "scenario_type": "label_diversity",
+      "selection_step": "label_diversity",
+      "tags": [
+        "label_diversity"
+      ],
+      "presentation_tag": "Diverse",
+      "positive_targets": [
+        "ACL",
+        "Medial Meniscus",
+        "PF OA",
+        "Effusion",
+        "Baker's",
+        "Contusion"
+      ],
+      "positive_target_count": 6,
+      "negative_target_count": 6,
+      "label_vector": [
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        1,
+        0,
+        1,
+        1,
+        0
+      ],
+      "series_count": 6,
+      "dicom_count": 165,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 2,
+        "Sagittal": 3
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Added by farthest-point selection: its label pattern and study structure are the most different from the scenarios already chosen.",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for ACL, Medial Meniscus, PF OA, Effusion, Baker's, Contusion. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-016",
+      "study_id": "1.2.826.0.1.3680043.8.498.97274720257634584071500649275217521662",
+      "title": "Structural outlier / 5 series, 298 images",
+      "scenario_type": "structural_diversity",
+      "selection_step": "structural_diversity",
+      "tags": [
+        "review_candidate",
+        "structural_diversity"
+      ],
+      "presentation_tag": "Outlier",
+      "positive_targets": [
+        "ACL",
+        "Medial Meniscus",
+        "Synovitis",
+        "Baker's",
+        "Contusion",
+        "Fracture"
+      ],
+      "positive_target_count": 6,
+      "negative_target_count": 6,
+      "label_vector": [
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1
+      ],
+      "series_count": 5,
+      "dicom_count": 298,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 2,
+        "Coronal": 1,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 2,
+      "fat_suppressed_series": 2,
+      "why_selected": "Structurally distant from the rest of the set (5 series, 298 DICOM files, plane pattern 2/1/2). Useful for the review/uncertainty demonstration.",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for ACL, Medial Meniscus, Synovitis, Baker's, Contusion, Fracture. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-017",
+      "study_id": "1.2.826.0.1.3680043.8.498.12801308844398614687904447633432197492",
+      "title": "Distinct label pattern / Medial meniscus, Lateral meniscus, Medial OA +4",
+      "scenario_type": "label_diversity",
+      "selection_step": "label_diversity",
+      "tags": [
+        "complex_case",
+        "high_multilabel",
+        "label_diversity",
+        "review_candidate",
+        "structural_diversity"
+      ],
+      "presentation_tag": "Complex",
+      "positive_targets": [
+        "Medial Meniscus",
+        "Lateral Meniscus",
+        "Medial OA",
+        "Effusion",
+        "Synovitis",
+        "Baker's",
+        "Contusion"
+      ],
+      "positive_target_count": 7,
+      "negative_target_count": 5,
+      "label_vector": [
+        0,
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        0
+      ],
+      "series_count": 5,
+      "dicom_count": 98,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 2,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Added by farthest-point selection: its label pattern and study structure are the most different from the scenarios already chosen. Useful for the review/uncertainty demonstration.",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for Medial Meniscus, Lateral Meniscus, Medial OA, Effusion, Synovitis, Baker's, Contusion. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-018",
+      "study_id": "1.2.826.0.1.3680043.8.498.37040910196459054543310335064167212742",
+      "title": "Distinct label pattern / ACL, Medial meniscus, Lateral meniscus +4",
+      "scenario_type": "label_diversity",
+      "selection_step": "label_diversity",
+      "tags": [
+        "complex_case",
+        "high_multilabel",
+        "label_diversity",
+        "review_candidate",
+        "structural_diversity"
+      ],
+      "presentation_tag": "Complex",
+      "positive_targets": [
+        "ACL",
+        "Medial Meniscus",
+        "Lateral Meniscus",
+        "Effusion",
+        "Synovitis",
+        "Contusion",
+        "Fracture"
+      ],
+      "positive_target_count": 7,
+      "negative_target_count": 5,
+      "label_vector": [
+        1,
+        0,
+        1,
+        1,
+        0,
+        0,
+        0,
+        1,
+        1,
+        0,
+        1,
+        1
+      ],
+      "series_count": 5,
+      "dicom_count": 105,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 1,
+        "Sagittal": 3
+      },
+      "fluid_sensitive_series": 4,
+      "fat_suppressed_series": 4,
+      "why_selected": "Added by farthest-point selection: its label pattern and study structure are the most different from the scenarios already chosen. Useful for the review/uncertainty demonstration.",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for ACL, Medial Meniscus, Lateral Meniscus, Effusion, Synovitis, Contusion, Fracture. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-019",
+      "study_id": "1.2.826.0.1.3680043.8.498.32321830776739689645700555055955725945",
+      "title": "Distinct label pattern / ACL, MCL, PF OA +4",
+      "scenario_type": "label_diversity",
+      "selection_step": "label_diversity",
+      "tags": [
+        "complex_case",
+        "high_multilabel",
+        "label_diversity",
+        "review_candidate",
+        "structural_diversity"
+      ],
+      "presentation_tag": "Complex",
+      "positive_targets": [
+        "ACL",
+        "MCL",
+        "PF OA",
+        "Effusion",
+        "Synovitis",
+        "Contusion",
+        "Fracture"
+      ],
+      "positive_target_count": 7,
+      "negative_target_count": 5,
+      "label_vector": [
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0,
+        1,
+        1
+      ],
+      "series_count": 5,
+      "dicom_count": 106,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 2,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Added by farthest-point selection: its label pattern and study structure are the most different from the scenarios already chosen. Useful for the review/uncertainty demonstration.",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for ACL, MCL, PF OA, Effusion, Synovitis, Contusion, Fracture. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-020",
+      "study_id": "1.2.826.0.1.3680043.8.498.62465595376489211274225312453216559395",
+      "title": "Distinct label pattern / ACL, MCL, Medial meniscus +4",
+      "scenario_type": "label_diversity",
+      "selection_step": "label_diversity",
+      "tags": [
+        "complex_case",
+        "high_multilabel",
+        "label_diversity",
+        "review_candidate",
+        "structural_diversity"
+      ],
+      "presentation_tag": "Complex",
+      "positive_targets": [
+        "ACL",
+        "MCL",
+        "Medial Meniscus",
+        "Lateral OA",
+        "Effusion",
+        "Synovitis",
+        "Fracture"
+      ],
+      "positive_target_count": 7,
+      "negative_target_count": 5,
+      "label_vector": [
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0,
+        1,
+        1,
+        0,
+        0,
+        1
+      ],
+      "series_count": 4,
+      "dicom_count": 110,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 1,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 2,
+      "fat_suppressed_series": 2,
+      "why_selected": "Added by farthest-point selection: its label pattern and study structure are the most different from the scenarios already chosen. Useful for the review/uncertainty demonstration.",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for ACL, MCL, Medial Meniscus, Lateral OA, Effusion, Synovitis, Fracture. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-021",
+      "study_id": "1.2.826.0.1.3680043.8.498.88077418639301174409926781329613570435",
+      "title": "High multilabel burden (9 of 12 targets)",
+      "scenario_type": "high_multilabel",
+      "selection_step": "high_multilabel",
+      "tags": [
+        "complex_case",
+        "high_multilabel"
+      ],
+      "presentation_tag": "Complex",
+      "positive_targets": [
+        "ACL",
+        "Medial Meniscus",
+        "Lateral Meniscus",
+        "Medial OA",
+        "Lateral OA",
+        "PF OA",
+        "Effusion",
+        "Synovitis",
+        "Baker's"
+      ],
+      "positive_target_count": 9,
+      "negative_target_count": 3,
+      "label_vector": [
+        1,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        0
+      ],
+      "series_count": 6,
+      "dicom_count": 213,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 1,
+        "Coronal": 3,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Among the highest multilabel burdens in the local labelled set (9 of 12 targets positive).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for ACL, Medial Meniscus, Lateral Meniscus, Medial OA, Lateral OA, PF OA, Effusion, Synovitis, Baker's. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    },
+    {
+      "scenario_id": "AMD-022",
+      "study_id": "1.2.826.0.1.3680043.8.498.16060119389060497136231217718921482192",
+      "title": "High multilabel burden (9 of 12 targets) [7 series, 239 images]",
+      "scenario_type": "high_multilabel",
+      "selection_step": "high_multilabel",
+      "tags": [
+        "complex_case",
+        "high_multilabel"
+      ],
+      "presentation_tag": "Complex",
+      "positive_targets": [
+        "Medial Meniscus",
+        "Lateral Meniscus",
+        "Medial OA",
+        "Lateral OA",
+        "PF OA",
+        "Effusion",
+        "Synovitis",
+        "Baker's",
+        "Fracture"
+      ],
+      "positive_target_count": 9,
+      "negative_target_count": 3,
+      "label_vector": [
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        1
+      ],
+      "series_count": 7,
+      "dicom_count": 239,
+      "planes": [
+        "Axial",
+        "Coronal",
+        "Sagittal"
+      ],
+      "plane_series_counts": {
+        "Axial": 3,
+        "Coronal": 2,
+        "Sagittal": 2
+      },
+      "fluid_sensitive_series": 3,
+      "fat_suppressed_series": 3,
+      "why_selected": "Among the highest multilabel burdens in the local labelled set (9 of 12 targets positive).",
+      "expected_demo_behavior": "Resolve the study by study_id, show the deterministic quality status and the 12 model probabilities side by side; the competition reference labels are positive for Medial Meniscus, Lateral Meniscus, Medial OA, Lateral OA, PF OA, Effusion, Synovitis, Baker's, Fracture. Probabilities are research outputs, not a diagnosis; a reviewer decision is required.",
+      "data_source": "RSNA Knee Abnormality Detection"
+    }
+  ]
+}

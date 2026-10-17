@@ -1,0 +1,103 @@
+{
+  "scenario_set": "amd_mri_core_demo_v1",
+  "schema_version": "1.0",
+  "scenario_count": 22,
+  "candidate_pool": 58,
+  "targets_with_a_positive_scenario": 12,
+  "per_target": {
+    "ACL": {
+      "positive_scenarios": 9,
+      "negative_scenarios": 13
+    },
+    "MCL": {
+      "positive_scenarios": 4,
+      "negative_scenarios": 18
+    },
+    "Medial Meniscus": {
+      "positive_scenarios": 10,
+      "negative_scenarios": 12
+    },
+    "Lateral Meniscus": {
+      "positive_scenarios": 5,
+      "negative_scenarios": 17
+    },
+    "Medial OA": {
+      "positive_scenarios": 4,
+      "negative_scenarios": 18
+    },
+    "Lateral OA": {
+      "positive_scenarios": 4,
+      "negative_scenarios": 18
+    },
+    "PF OA": {
+      "positive_scenarios": 7,
+      "negative_scenarios": 15
+    },
+    "Effusion": {
+      "positive_scenarios": 10,
+      "negative_scenarios": 12
+    },
+    "Synovitis": {
+      "positive_scenarios": 9,
+      "negative_scenarios": 13
+    },
+    "Baker's": {
+      "positive_scenarios": 6,
+      "negative_scenarios": 16
+    },
+    "Contusion": {
+      "positive_scenarios": 8,
+      "negative_scenarios": 14
+    },
+    "Fracture": {
+      "positive_scenarios": 7,
+      "negative_scenarios": 15
+    }
+  },
+  "positive_count_distribution": {
+    "1": 7,
+    "2": 4,
+    "3": 2,
+    "4": 1,
+    "6": 2,
+    "7": 4,
+    "9": 2
+  },
+  "positive_count_min_median_max": [
+    1,
+    2.5,
+    9
+  ],
+  "scenario_type_counts": {
+    "high_multilabel": 2,
+    "label_diversity": 5,
+    "low_label_count": 1,
+    "structural_diversity": 2,
+    "target_anchor": 12
+  },
+  "tag_counts": {
+    "complex_case": 6,
+    "high_multilabel": 6,
+    "label_diversity": 5,
+    "low_label_count": 11,
+    "review_candidate": 5,
+    "structural_diversity": 9,
+    "target_anchor": 12
+  },
+  "series_count_range": [
+    4,
+    9
+  ],
+  "dicom_count_range": [
+    98,
+    572
+  ],
+  "distinct_label_vectors": 22,
+  "pairwise_hamming_min_mean_max": [
+    1,
+    5.165,
+    11
+  ],
+  "plane_patterns": 10,
+  "model_tags_present": false
+}
