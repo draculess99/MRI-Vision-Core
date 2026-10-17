@@ -22,6 +22,7 @@ from hackathon.amd.agent_bridge_adapter import to_study_inference_result
 from hackathon.amd.kaggle_mil_bridge import TARGET_COLUMNS
 from hackathon.amd.llm_providers import (
     _ALLOWED_KEYS,
+    AMD_MAX_TOKENS,
     AMDTokenFactoryLLMAdapter,
     GroqAdapter,
     LLMProviderError,
@@ -481,6 +482,58 @@ class TestAMDTokenFactorySuccess:
         proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
         assert proposal.raw_text == "the real reviewed summary"
         assert "chain-of-thought" not in proposal.raw_text
+
+    def test_real_response_shape_has_a_sibling_reasoning_field_alongside_content(self, monkeypatch):
+        """Regression test for the actual AMD Token Factory response shape, captured from five
+        live calls (synthetic, non-medical data) during debugging of a reported "message.content
+        is missing" failure. Every real call returned top-level
+        {id, object, created, model, choices, usage, metadata}, with choices[0].message holding
+        {role, content, tool_calls, reasoning} -- content was always present and valid in all
+        five calls, confirming it is (and remains) the correct field to parse. This fixture
+        mirrors that exact shape, including the extra `tool_calls`/`metadata`/`usage` noise this
+        adapter must ignore without erroring."""
+        wf = _workflow()
+
+        def _fake_post(*args, **kwargs):
+            return _FakeResponse(json_body={
+                "id": "chatcmpl-abc123", "object": "chat.completion", "created": 1792274349,
+                "model": "Qwen3.8-27B",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": _structured_content("A real captured-shape summary."),
+                        "tool_calls": None,
+                        "reasoning": "x" * 2000,  # a long hidden reasoning trace, never read
+                    },
+                    "logprobs": None, "finish_reason": "stop", "matched_stop": 248046,
+                }],
+                "usage": {"prompt_tokens": 329, "completion_tokens": 543, "reasoning_tokens": 498},
+                "metadata": {"request_id": "req_abc", "used_provider": "some-upstream"},
+            })
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
+        assert proposal.raw_text == "A real captured-shape summary."
+
+    def test_max_tokens_gives_headroom_beyond_the_observed_reasoning_token_usage(self, monkeypatch):
+        """Live debugging observed reasoning_tokens as high as 643 and completion_tokens
+        (reasoning + content combined) as high as 678 out of the former 800 max_tokens budget --
+        only ~15% headroom left for content. AMD_MAX_TOKENS must stay comfortably above that
+        observed high-water mark so a slightly longer reasoning trace doesn't exhaust the
+        budget before any content is emitted."""
+        wf = _workflow()
+        captured = {}
+
+        def _fake_post(url, headers=None, json=None, timeout=None):
+            captured["json"] = json
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("ok")}}]})
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        _amd_adapter().propose(wf.bundle, wf.consensus)
+
+        assert captured["json"]["max_tokens"] == AMD_MAX_TOKENS
+        assert AMD_MAX_TOKENS >= 1200  # comfortably above the observed 678/800 high-water mark
 
 
 class TestAMDTokenFactoryFailureModes:

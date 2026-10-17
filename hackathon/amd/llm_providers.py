@@ -310,6 +310,19 @@ def _extract_groq_structured_summary(data: Any) -> str:
 AMD_CHAT_COMPLETIONS_PATH = "/chat/completions"
 DEFAULT_AMD_TIMEOUT_SECONDS = 60.0  # matches the one verified live connectivity test's timeout
 
+# Qwen3.8-27B (the verified AMD Token Factory model) is a reasoning model whose hidden
+# `reasoning` trace and final `content` share one max_tokens budget. Live debugging (five
+# real requests against this endpoint, synthetic non-medical data) showed reasoning_tokens
+# alone reaching 643 of an 800 max_tokens budget -- completion_tokens (reasoning + content
+# combined) as high as 678/800, just ~15% of headroom left for content. All five calls still
+# returned a valid, non-empty content field in this session, but that margin is thin enough
+# that a slightly longer reasoning trace would exhaust the budget before any content is
+# emitted, producing exactly the "message.content is missing, empty, or not a string" fallback
+# this adapter already handles correctly (see llm_adapter tests) -- it would just do so more
+# often than necessary. Raising the budget is the minimal fix: it does not change where the
+# answer is parsed from (content was, and remains, the correct field) or weaken any screening.
+AMD_MAX_TOKENS = 1500
+
 # json_object (not Groq's strict json_schema) per the verified contract: this endpoint was
 # tested live with response_format={"type": "json_object"} and returned valid structured JSON
 # in message.content. The *outer* message.content -> inner {"summary": str} validation is
@@ -390,7 +403,7 @@ class AMDTokenFactoryLLMAdapter:
             "response_format": _AMD_RESPONSE_FORMAT,
             "reasoning_effort": "low",
             "temperature": 0.0,
-            "max_tokens": 800,
+            "max_tokens": AMD_MAX_TOKENS,
             "stream": False,
         }
         try:
