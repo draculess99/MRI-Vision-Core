@@ -80,16 +80,13 @@ class TestRealScenarioFile:
 
     def test_loading_touches_only_the_json_file_not_any_optional_dependency(self):
         """Regression-style guard: importing/using this module must never require torch,
-        pydicom, or streamlit. If any of those modules got imported as a side effect of
-        load_scenarios(), that would mean metadata browsing silently grew a heavier
-        dependency than intended."""
-        import sys
-
-        for forbidden in ("torch", "pydicom", "streamlit"):
-            sys.modules.pop(forbidden, None)
+        pydicom, or streamlit. The real guarantee is structural (see the module's own
+        imports, checked below) -- this does not pop torch/pydicom/streamlit out of
+        sys.modules, since doing so without restoring them afterward corrupts process-wide
+        state (e.g. streamlit's internal DeltaGeneratorSingleton) for any AppTest-based test
+        that runs later in the same pytest session, such as tests/test_amd_streamlit_app.py
+        when the whole test suite is collected together."""
         load_scenarios()
-        # Not asserting absence after the call (pytest's own plugins may import these
-        # independently) -- the real guarantee is structural: see the module's own imports.
         import hackathon.amd.benchmark_scenarios as module
         import inspect
 
