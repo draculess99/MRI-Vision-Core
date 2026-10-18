@@ -55,29 +55,53 @@ _ALLOWED_KEYS = frozenset(
     }
 )
 
-# A real AMD Token Factory response once produced a 619-character summary, which
-# screen_proposal() correctly BLOCKED for exceeding mri_core's own MAX_PROPOSAL_LENGTH (500) --
-# the shared gate did its job, but a tighter prompt avoids relying on that gate alone for every
-# response. The adapter-level length check below (_MAX_SUMMARY_LENGTH) is a second, independent
-# backstop at the same threshold, so an oversized response is rejected with a specific,
-# diagnosable LLMProviderUnavailableError instead of silently reaching screen_proposal() and
-# coming back opaquely BLOCKED.
-_SUMMARY_CHAR_BUDGET = 350  # comfortable margin under MAX_PROPOSAL_LENGTH (500)
+# The explanation layer's one and only job: restate WHY the deterministic Specialist/Critic/
+# Consensus pipeline reached the result it already reached -- never to re-decide it. Every field
+# below must be derivable from the redact_for_external_llm() payload alone (workflow_status,
+# specialist_groups, critic_codes/critic_severities, quality_gate_status, is_ensemble,
+# model_count, limitations); nothing here changes what is sent, only what is asked for in return.
+_EXPLANATION_FIELDS = ("specialist_summary", "critic_summary", "consensus_explanation", "reviewer_focus")
+
+# Per-field character budgets, tight enough that the combined canonical JSON still fits under
+# mri_core.agents.llm_adapter.MAX_PROPOSAL_LENGTH (500) -- the same shared, unmodified cap
+# screen_proposal() already enforces on the combined raw_text. Four short fields sharing one
+# 500-char budget is tighter than the single-sentence design this replaces; that is intentional,
+# not a relaxation of any limit. critic_summary is wider than the others: a live AMD Token
+# Factory response naming all three findings in the common demo case (QUALITY_NOT_ASSESSED,
+# ENGINE_WARNINGS_PRESENT, NO_EVIDENCE_REFERENCES) needed 107 characters.
+_FIELD_MAX_LENGTHS = {
+    "specialist_summary": 60,
+    "critic_summary": 135,
+    "consensus_explanation": 110,
+    "reviewer_focus": 80,
+}
 
 _SYSTEM_PROMPT = (
-    "You are a research-workflow assistant for a non-diagnostic MRI research prototype. "
-    "You will be given deterministic, de-identified workflow data: a workflow status, grouped "
-    "research model scores, structural finding codes, and stated limitations. No patient "
-    "identifier, study identifier, file path, or image data is present or available to you. "
-    "Respond with a JSON object matching the given schema: a single \"summary\" field containing "
-    f"a plain-language summary of this workflow data only, in ONE short sentence of no more than "
-    f"{_SUMMARY_CHAR_BUDGET} characters total -- brevity is required, not optional; do not pad, "
-    "repeat, or add caveats beyond what is asked. Never state or imply a diagnosis, a clinical "
-    "finding, certainty, or that any clinician approved or reviewed anything. Never invent facts "
-    "not present in the data you were given."
+    "You are a research-workflow assistant for a non-diagnostic MRI research prototype. You "
+    "will be given deterministic, de-identified workflow evidence already produced by fixed, "
+    "rule-based Specialist/Critic/Consensus logic: workflow_status, specialist_groups (grouped "
+    "research model scores), critic_codes/critic_severities (structural findings), "
+    "quality_gate_status, is_ensemble, model_count, and limitations. No patient identifier, "
+    "study identifier, file path, or image data is present or available to you.\n\n"
+    "Your only job is to EXPLAIN this already-decided deterministic result in plain language -- "
+    "never to re-decide, override, or second-guess it. Respond with a JSON object with exactly "
+    "these four required string fields, each ONE short sentence, derived ONLY from the fields "
+    "given above (never invent a finding, score, or next step not implied by them):\n"
+    f"  specialist_summary (<= {_FIELD_MAX_LENGTHS['specialist_summary']} chars): what the "
+    "Specialist organized from the given specialist_groups, preserving scores verbatim.\n"
+    f"  critic_summary (<= {_FIELD_MAX_LENGTHS['critic_summary']} chars): the actual critic_codes "
+    "/critic_severities given, in plain language -- name the real issues, invent no others.\n"
+    f"  consensus_explanation (<= {_FIELD_MAX_LENGTHS['consensus_explanation']} chars): why those "
+    "critic findings plus quality_gate_status/inference state produced exactly the given "
+    "workflow_status -- connect cause to effect explicitly.\n"
+    f"  reviewer_focus (<= {_FIELD_MAX_LENGTHS['reviewer_focus']} chars): what a human reviewer "
+    "should check or complete next, based only on the given findings.\n\n"
+    "Never state or imply a diagnosis, a clinical finding, certainty, or that any clinician "
+    "approved or reviewed anything. Never invent facts not present in the data you were given. "
+    "Include no field other than these four."
 )
 
-# Structured-output schema for Groq's response_format: a single required string field. Using
+# Structured-output schema for Groq's response_format: four required string fields. Using
 # json_schema (strict mode) rather than freeform text is what makes the *final* answer land in
 # message.content reliably for reasoning models like openai/gpt-oss-20b -- without it, a
 # reasoning model can spend its whole token budget on hidden reasoning and leave message.content
@@ -85,12 +109,12 @@ _SYSTEM_PROMPT = (
 _REVIEWER_RESULT_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
-        "name": "reviewer_result",
+        "name": "reviewer_explanation",
         "strict": True,
         "schema": {
             "type": "object",
-            "properties": {"summary": {"type": "string"}},
-            "required": ["summary"],
+            "properties": {field: {"type": "string"} for field in _EXPLANATION_FIELDS},
+            "required": list(_EXPLANATION_FIELDS),
             "additionalProperties": False,
         },
     },
@@ -167,10 +191,29 @@ def _assert_no_leakage(payload: dict, bundle: EvidenceBundle) -> None:
             raise LLMProviderError(f"Refusing to send payload: it contains a forbidden value ({value!r}).")
 
 
+def _truncate(text: str, max_length: int) -> str:
+    """Used only by LocalDeterministicAdapter to keep its deterministic text within the same
+    per-field budgets the network providers are asked to respect -- never used to validate or
+    silently accept an oversized network response (see _extract_structured_explanation, which
+    rejects those outright instead)."""
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 1].rstrip() + "…"
+
+
 class LocalDeterministicAdapter:
     """Always available. No network call, no credential, no code path that could leak
     anything -- it only restates fields already present on bundle/consensus, same pattern as
-    the shared OfflineStubAdapter."""
+    the shared OfflineStubAdapter.
+
+    Produces the same four-field structured explanation shape as the network-backed providers
+    (see _EXPLANATION_FIELDS), so the Streamlit UI's rendering is identical regardless of which
+    provider actually ran. Unlike the network providers, nothing here is generated by a model --
+    `consensus.reasons` and `consensus.required_next_steps` already ARE the deterministic
+    Consensus layer's own explanation of its own decision (see mri_core/agents/consensus.py), so
+    this adapter only reformats them; it never infers or invents anything beyond what those two
+    fields (plus the specialist/critic summaries) already state.
+    """
 
     name = "local"
 
@@ -178,12 +221,31 @@ class LocalDeterministicAdapter:
         return LLMProviderStatus(self.name, True, "Always available; no network call, no credential.")
 
     def propose(self, bundle: EvidenceBundle, consensus: ConsensusResult) -> RawProposal:
-        text = (
-            f"Workflow status is {consensus.workflow_status.value}. "
-            f"{bundle.model_count} model(s) were used. Quality gate: {bundle.quality_gate_status.value}. "
-            f"Critic findings: {len(consensus.critic_findings)}."
+        specialist_summary = (
+            f"Specialist grouped 12 scores into {len(consensus.specialist_summaries)} "
+            "categories, unchanged."
         )
-        return RawProposal(raw_text=text, cited_evidence=bundle.evidence_references)
+
+        if consensus.critic_findings:
+            codes = ", ".join(f.code for f in consensus.critic_findings)
+            critic_summary = f"Critic identified {len(consensus.critic_findings)} issue(s): {codes}."
+        else:
+            critic_summary = "Critic identified no evidence issues."
+
+        consensus_explanation = (
+            f"Consensus assigned {consensus.workflow_status.value}: " + "; ".join(consensus.reasons)
+        )
+
+        reviewer_focus = "; ".join(consensus.required_next_steps) or "No further action specified."
+
+        structured = {
+            "specialist_summary": _truncate(specialist_summary, _FIELD_MAX_LENGTHS["specialist_summary"]),
+            "critic_summary": _truncate(critic_summary, _FIELD_MAX_LENGTHS["critic_summary"]),
+            "consensus_explanation": _truncate(consensus_explanation, _FIELD_MAX_LENGTHS["consensus_explanation"]),
+            "reviewer_focus": _truncate(reviewer_focus, _FIELD_MAX_LENGTHS["reviewer_focus"]),
+        }
+        raw_text = json.dumps(structured, separators=(",", ":"))
+        return RawProposal(raw_text=raw_text, cited_evidence=bundle.evidence_references)
 
 
 class GroqAdapter:
@@ -226,7 +288,11 @@ class GroqAdapter:
             "response_format": _REVIEWER_RESULT_RESPONSE_FORMAT,
             "reasoning_effort": "low",
             "temperature": 0.0,
-            "max_tokens": 800,
+            # Raised from 800 alongside the AMD budget increase: a 4-field structured
+            # explanation is a heavier completion than the single-sentence summary this
+            # replaces, and openai/gpt-oss-20b is also a reasoning model subject to the same
+            # reasoning-trace/content budget-sharing behavior documented for AMD_MAX_TOKENS.
+            "max_tokens": 1200,
         }
         try:
             response = requests.post(
@@ -247,19 +313,24 @@ class GroqAdapter:
         except ValueError as exc:
             raise LLMProviderUnavailableError("Groq response was not valid JSON.") from exc
 
-        text = _extract_groq_structured_summary(data)
+        text = _extract_groq_structured_explanation(data)
         return RawProposal(raw_text=text, cited_evidence=())
 
 
-_MAX_SUMMARY_LENGTH = MAX_PROPOSAL_LENGTH  # same 500-char cap screen_proposal() itself enforces;
-# exceeding it is rejected here first, with a specific error, rather than reaching screen_proposal()
-# and coming back only as an opaque BLOCKED. This is a second check at the SAME threshold, not a
-# looser one -- it never permits anything screen_proposal() would reject, only fails earlier/clearer.
+_MAX_COMBINED_LENGTH = MAX_PROPOSAL_LENGTH  # the same 500-char cap screen_proposal() itself
+# enforces on the combined raw_text; exceeding it is rejected here first, with a specific error,
+# rather than reaching screen_proposal() and coming back only as an opaque BLOCKED. This is a
+# second check at the SAME threshold, not a looser one -- it never permits anything
+# screen_proposal() would reject, only fails earlier/clearer.
 
 
-def _extract_structured_summary(data: Any, *, provider_label: str) -> str:
+def _extract_structured_explanation(data: Any, *, provider_label: str) -> str:
     """Strict schema check shared by every network-backed adapter (Groq, AMD Token Factory),
-    in two layers -- both rejecting outright rather than guessing:
+    in two layers -- both rejecting outright rather than guessing. Returns the canonical,
+    compact-JSON `raw_text` for RawProposal: `{"specialist_summary":...,"critic_summary":...,
+    "consensus_explanation":...,"reviewer_focus":...}`, re-serialized from the validated fields
+    (never the model's own, possibly differently-whitespaced JSON text) so length checks and
+    downstream UI parsing are both exact and deterministic.
 
     1. The outer HTTP response: only `choices[0].message.content` is ever read. A reasoning
        model's `reasoning` (or any `reasoning_content`-style) field is NEVER read as a
@@ -267,9 +338,11 @@ def _extract_structured_summary(data: Any, *, provider_label: str) -> str:
        trace, not its reviewed answer, and treating it as the answer would silently accept
        unreviewed, unstructured text that bypassed the schema this function enforces.
     2. The inner structured payload: `content` must itself be valid JSON -- a dict with
-       exactly one key, `summary`, holding a non-empty string no longer than
-       `_MAX_SUMMARY_LENGTH`. Any other shape (missing key, extra key, non-string value,
-       oversized value, or `content` that isn't valid JSON at all) is rejected.
+       exactly the four required _EXPLANATION_FIELDS keys (no more, no fewer), each a
+       non-empty string within its own _FIELD_MAX_LENGTHS budget. Any other shape (missing
+       key, extra key, non-string value, oversized value, or `content` that isn't valid JSON
+       at all) is rejected. The re-serialized combined text is then checked once more against
+       _MAX_COMBINED_LENGTH as a final backstop.
     """
     if not isinstance(data, dict):
         raise LLMProviderUnavailableError(f"{provider_label} response was not a JSON object.")
@@ -289,39 +362,64 @@ def _extract_structured_summary(data: Any, *, provider_label: str) -> str:
     except ValueError as exc:
         raise LLMProviderUnavailableError(f"{provider_label} response's message.content was not valid JSON.") from exc
 
-    if not isinstance(structured, dict) or set(structured.keys()) != {"summary"}:
+    if not isinstance(structured, dict) or set(structured.keys()) != set(_EXPLANATION_FIELDS):
         raise LLMProviderUnavailableError(
-            f"{provider_label} structured response did not match the expected {{'summary': str}} schema: {structured!r}"
+            f"{provider_label} structured response did not match the expected "
+            f"{sorted(_EXPLANATION_FIELDS)} schema: {structured!r}"
         )
-    summary = structured["summary"]
-    if not isinstance(summary, str) or not summary.strip():
-        raise LLMProviderUnavailableError(f"{provider_label} structured response's 'summary' is missing, empty, or not a string.")
-    if len(summary) > _MAX_SUMMARY_LENGTH:
+
+    for field_name in _EXPLANATION_FIELDS:
+        value = structured[field_name]
+        if not isinstance(value, str) or not value.strip():
+            raise LLMProviderUnavailableError(
+                f"{provider_label} structured response's {field_name!r} is missing, empty, or not a string."
+            )
+        if len(value) > _FIELD_MAX_LENGTHS[field_name]:
+            raise LLMProviderUnavailableError(
+                f"{provider_label} structured response's {field_name!r} exceeds max length "
+                f"{_FIELD_MAX_LENGTHS[field_name]} characters."
+            )
+
+    canonical = {field_name: structured[field_name] for field_name in _EXPLANATION_FIELDS}
+    raw_text = json.dumps(canonical, separators=(",", ":"))
+    if len(raw_text) > _MAX_COMBINED_LENGTH:
         raise LLMProviderUnavailableError(
-            f"{provider_label} structured response's 'summary' exceeds max length {_MAX_SUMMARY_LENGTH} characters."
+            f"{provider_label} structured response exceeds combined max length {_MAX_COMBINED_LENGTH} characters."
         )
-    return summary
+    return raw_text
 
 
-def _extract_groq_structured_summary(data: Any) -> str:
-    return _extract_structured_summary(data, provider_label="Groq")
+def _extract_groq_structured_explanation(data: Any) -> str:
+    return _extract_structured_explanation(data, provider_label="Groq")
 
 
 AMD_CHAT_COMPLETIONS_PATH = "/chat/completions"
-DEFAULT_AMD_TIMEOUT_SECONDS = 60.0  # matches the one verified live connectivity test's timeout
 
 # Qwen3.8-27B (the verified AMD Token Factory model) is a reasoning model whose hidden
-# `reasoning` trace and final `content` share one max_tokens budget. Live debugging (five
-# real requests against this endpoint, synthetic non-medical data) showed reasoning_tokens
-# alone reaching 643 of an 800 max_tokens budget -- completion_tokens (reasoning + content
-# combined) as high as 678/800, just ~15% of headroom left for content. All five calls still
-# returned a valid, non-empty content field in this session, but that margin is thin enough
-# that a slightly longer reasoning trace would exhaust the budget before any content is
-# emitted, producing exactly the "message.content is missing, empty, or not a string" fallback
-# this adapter already handles correctly (see llm_adapter tests) -- it would just do so more
-# often than necessary. Raising the budget is the minimal fix: it does not change where the
-# answer is parsed from (content was, and remains, the correct field) or weaken any screening.
-AMD_MAX_TOKENS = 1500
+# `reasoning` trace and final `content` share one max_tokens budget. The single-sentence
+# summary this adapter used to ask for fit in 800, then 1500, tokens of budget. The four-field
+# structured explanation is a meaningfully heavier completion task, and live debugging after
+# that change (real requests against this endpoint, synthetic non-medical data) showed
+# reasoning_tokens alone exhausting the full former 1500-token budget on every attempt
+# (reasoning_tokens=1500/1500, content empty, finish_reason="length") -- a 100% fallback rate
+# at that budget for this task, not the "thin margin" the single-sentence design had. Raising
+# the budget to 2200 produced one full real success (reasoning_tokens=1613, content=431 chars,
+# finish_reason="stop", all four fields within their own _FIELD_MAX_LENGTHS). A further test at
+# 2600 still exhausted the budget on reasoning alone (reasoning_tokens=2600/2600) -- this
+# model's reasoning length is genuinely non-deterministic run to run even at temperature=0.0,
+# so no budget value can *guarantee* success every call; 2200 is the smallest budget with a
+# confirmed real success, balancing that against request latency (an 89s real call was observed
+# at a 2600-token budget). The local deterministic fallback (propose_with_fallback(), already
+# tested) remains the safety net for whichever calls still exhaust it -- raising this budget
+# does not change where the answer is parsed from (content was, and remains, the correct field)
+# or weaken any screening.
+AMD_MAX_TOKENS = 2200
+
+# Doubled from the original 60s alongside the AMD_MAX_TOKENS increase above: generating up to
+# ~1700 completion tokens for the heavier four-field explanation measurably takes longer than
+# the single-sentence design's one real verified call did, and a timeout that fires before a
+# would-be-successful generation finishes just forces an unnecessary local fallback.
+DEFAULT_AMD_TIMEOUT_SECONDS = 120.0
 
 # json_object (not Groq's strict json_schema) per the verified contract: this endpoint was
 # tested live with response_format={"type": "json_object"} and returned valid structured JSON
@@ -438,7 +536,7 @@ class AMDTokenFactoryLLMAdapter:
         except ValueError as exc:
             raise LLMProviderUnavailableError("AMD Token Factory response was not valid JSON.") from exc
 
-        text = _extract_structured_summary(data, provider_label="AMD Token Factory")
+        text = _extract_structured_explanation(data, provider_label="AMD Token Factory")
         return RawProposal(raw_text=text, cited_evidence=())
 
 

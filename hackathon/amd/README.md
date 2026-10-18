@@ -12,12 +12,53 @@ layer can bypass.
 
 The workflow separates trained MRI inference, deterministic evidence review, optional
 LLM-assisted explanation, and explicit human authorization. The diagram below shows how those
-components interact. The LLM path is advisory and cannot alter model scores, consensus state, or
-human approval.
+components interact.
+
+```mermaid
+flowchart TD
+    MRI[MRI study] --> PRE[Preprocess and inference]
+    PRE --> SCORES[12 raw research scores]
+    SCORES --> BUNDLE[EvidenceBundle]
+    BUNDLE --> REVIEW[Deterministic review]
+    REVIEW --> GATE[Human Review Gate]
+
+    BUNDLE -.-> ALLOW[Allowlisted evidence]
+    ALLOW -.-> LLM[Optional LLM layer]
+    LLM -.-> PROVIDERS[AMD Token Factory Groq or local]
+    PROVIDERS -.-> SUMMARIES[Four reviewer summaries]
+```
+
+The dotted path is advisory only: the LLM provider never changes the 12 model scores, never
+changes the deterministic Consensus workflow status, and never submits an approval to the Human
+Review Gate — it only reads allowlisted evidence and returns text for a reviewer to read.
 
 ## How the review agents work together
 
-![AMD MRI-Core review agent flow](../../docs/images/amd_review_agent_flow.png)
+```mermaid
+flowchart TD
+    BUNDLE[EvidenceBundle] --> SPEC[Specialist groups scores]
+    SPEC --> CRIT[Critic checks evidence]
+    CRIT --> CONS[Consensus sets workflow status]
+    CONS --> GATE[Human Review Gate PENDING REVIEW]
+    GATE --> APPROVE[Approve]
+    GATE --> MORE[Request more evidence]
+    GATE --> ESCALATE[Escalate]
+
+    CONS -.-> ALLOW[Allowlisted evidence]
+    ALLOW -.-> LLM[Optional LLM layer]
+    LLM -.-> SECTIONS[Four display sections]
+```
+
+Only a named human, acting on the Human Review Gate directly, can Approve, Request more
+evidence, or Escalate — the optional LLM layer is a separate, display-only advisory path: it
+never changes the Consensus workflow status and never submits an approval or any other decision
+to the gate on a human's behalf.
+
+The following Streamlit view is implementation evidence: it renders the structured
+reviewer-facing sections while the deterministic workflow and human-review state remain
+unchanged.
+
+![AMD Review Agent Flow — Streamlit UI](../../docs/images/02_review_agent_explanation.png)
 
 Specialist, Critic, and Consensus are deterministic, pure functions over one `EvidenceBundle`;
 an orchestrator runs them in sequence, each passing its output to the next.

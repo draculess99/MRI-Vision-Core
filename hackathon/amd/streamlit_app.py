@@ -23,7 +23,6 @@ score verbatim, a deterministic structural check, or a simulated workflow/review
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -45,7 +44,6 @@ from hackathon.amd.data_config import resolve_data_paths, validate_data_paths
 from hackathon.amd.kaggle_mil_bridge import BridgeError, load_bridge_checkpoint, run_study_inference
 from hackathon.amd.llm_config import build_adapter, resolve_llm_config
 from hackathon.amd.llm_providers import LocalDeterministicAdapter, propose_with_fallback
-from hackathon.amd.providers import AMDTokenFactoryProvider, LocalProvider
 from hackathon.amd.review_actions import approve, escalate, is_escalation, request_more_evidence
 from hackathon.amd.run_real_checkpoint_smoke import NON_DIAGNOSTIC_NOTICE, pick_study_and_series, sha256_of_file
 from hackathon.amd.synthetic_demo import build_synthetic_demo_result
@@ -297,8 +295,46 @@ def render_workflow(result, *, key_prefix: str, extra_provenance: dict | None = 
             st.error(f"BLOCKED — {outcome.reason}")
             st.caption(f"Rejected text (shown for audit only, not evidence): {outcome.raw_text!r}")
         else:
-            st.warning(f"QUARANTINED (unverified) — {outcome.reason}")
-            st.markdown(f"> {outcome.raw_text}")
+            # The internal state is still exactly ProposalStatus.QUARANTINED (unchanged) --
+            # screen_proposal()'s own reason text is shown below, unedited, just de-emphasized
+            # rather than leading. Nothing here implies the text is approved or verified; it is
+            # presented as advisory only. outcome.raw_text is the canonical compact-JSON string
+            # llm_providers._extract_structured_explanation() (or LocalDeterministicAdapter)
+            # produced -- the four EXPLANATION_FIELDS, parsed here for display only. Parsing
+            # never affects outcome.status/outcome.reason, which came from the unmodified,
+            # shared screen_proposal() and are never recomputed from this parse.
+            st.info("LLM interpretation generated — human review required")
+            st.caption("Deterministic result → LLM explanation (below) → Human review")
+            st.write(
+                "The selected LLM provider returned a response that passed automated format and "
+                "safety checks. Because this is AI-generated text, it is presented as advisory "
+                "only and is not treated as verified evidence. The underlying MRI model scores, "
+                "deterministic workflow status, and human-review gate remain unchanged."
+            )
+            st.caption(f"Status: {outcome.status.value} (advisory text; not verified evidence) — {outcome.reason}")
+
+            explanation = None
+            try:
+                parsed = json.loads(outcome.raw_text)
+                if isinstance(parsed, dict) and all(
+                    isinstance(parsed.get(field_name), str) and parsed.get(field_name)
+                    for field_name in ("specialist_summary", "critic_summary", "consensus_explanation", "reviewer_focus")
+                ):
+                    explanation = parsed
+            except (ValueError, TypeError):
+                explanation = None
+
+            if explanation is not None:
+                st.markdown("##### Specialist explanation")
+                st.markdown(f"> {explanation['specialist_summary']}")
+                st.markdown("##### Critic explanation")
+                st.markdown(f"> {explanation['critic_summary']}")
+                st.markdown("##### Consensus explanation")
+                st.markdown(f"> {explanation['consensus_explanation']}")
+                st.markdown("##### Reviewer focus")
+                st.markdown(f"> {explanation['reviewer_focus']}")
+            else:
+                st.markdown(f"> {outcome.raw_text}")
 
 
 # ------------------------------------------------------------------------------------- UI
@@ -329,29 +365,6 @@ with st.sidebar:
              "(environment or .env). Override freely.",
     )
 
-    st.header("Execution provider (hardware, not AI text)")
-    st.caption(
-        "Where the *model forward pass* above would run. This is separate from the "
-        "'Optional LLM interpretation' section further down the page, which is about AI-"
-        "generated text, not hardware."
-    )
-    local_status = LocalProvider().status()
-    st.write(f"**Local CPU (default):** {local_status.detail}")
-    amd_enabled = st.checkbox(
-        "Enable AMD Token Factory hardware execution (optional, not implemented)",
-        value=False, key="amd_enabled_checkbox",
-        help="Status/UI seam only -- there is no real client behind this yet, and nothing "
-             "here ever dispatches the model to AMD hardware. Not the same as the AMD Token "
-             "Factory *LLM* option below, which is implemented and live-verified.",
-    )
-    if amd_enabled:
-        base_url = st.text_input("Token Factory base URL", value=os.environ.get("AMD_TOKENFACTORY_BASE_URL", ""))
-        api_key = st.text_input("Token Factory API key", value="", type="password")
-        amd_status = AMDTokenFactoryProvider(enabled=True, base_url=base_url or None, api_key=api_key or None).status()
-        st.warning(amd_status.detail)
-    else:
-        st.caption("AMD Token Factory hardware execution: disabled by default; no network call is made.")
-
 st.divider()
 with st.expander(
     "🧪 Synthetic workflow demonstration — no real data, checkpoint, or inference required",
@@ -372,6 +385,11 @@ with st.expander(
 st.divider()
 st.subheader("Curated MRI Benchmark Scenarios")
 st.caption("Research/demo benchmark only; not clinical accuracy or medical performance.")
+
+# Set below, only when a selected scenario's study is confirmed locally available -- used to
+# pre-select that study in the single "Run trained inference" selectbox/button further down the
+# page, so there is exactly one inference button, not one here and a second, separate one below.
+scenario_resolved_study_uid = None
 
 try:
     scenario_set = load_scenarios()
@@ -439,26 +457,15 @@ else:
                     f"The underlying MRI study for {selected_scenario['scenario_id']} is "
                     "available locally under the configured data_root."
                 )
-                if checkpoint_input and st.button(
-                    f"Run real inference on {selected_scenario['scenario_id']}'s study",
-                    key="benchmark_run_inference_button",
-                ):
-                    try:
-                        resolved_uid, series_uid, plane, benchmark_result, benchmark_provenance = _run_inference(
-                            Path(data_root_input), Path(checkpoint_input), scenario_study_id
-                        )
-                    except BridgeError as exc:
-                        st.error(f"Inference failed: {exc}")
-                    else:
-                        st.session_state["last_result"] = {
-                            "study_uid": resolved_uid, "series_uid": series_uid, "plane": plane,
-                            "result": benchmark_result, "model_provenance": benchmark_provenance,
-                        }
-                        st.success(
-                            "Real inference complete -- scroll down to 'Run trained inference "
-                            "on this study' section below to see the result."
-                        )
-                elif not checkpoint_input:
+                # No separate button here -- this scenario's study is passed as the default
+                # selection to the single "Run trained inference" button further down the page
+                # (see scenario_resolved_study_uid), so there is exactly one inference button.
+                scenario_resolved_study_uid = scenario_study_id
+                st.caption(
+                    f"Scenario {selected_scenario['scenario_id']}'s study is pre-selected below "
+                    "in 'Run trained inference on selected MRI study'."
+                )
+                if not checkpoint_input:
                     st.caption("Configure a checkpoint in the sidebar to enable running real inference on this scenario.")
 
 if not data_root_input or not checkpoint_input:
@@ -489,9 +496,21 @@ if not available_studies:
     st.warning(f"No fully downloaded labeled study found under {data_root}.")
     st.stop()
 
-study_uid = st.selectbox("Available MRI study (StudyInstanceUID)", available_studies, key="study_select")
+# Pre-select the curated scenario's study (if one was chosen above and confirmed locally
+# available) so the single button below acts on it without the user having to find it again in
+# this list; only affects the selectbox's initial default -- the user can still pick any other
+# available study here, same as before this scenario selector existed.
+default_study_index = (
+    available_studies.index(scenario_resolved_study_uid)
+    if scenario_resolved_study_uid in available_studies else 0
+)
+study_uid = st.selectbox(
+    "Available MRI study (StudyInstanceUID)", available_studies, index=default_study_index, key="study_select",
+)
 
-run_clicked = st.button("Run trained inference on this study", type="primary", key="run_inference_button")
+run_clicked = st.button(
+    "Run trained inference on selected MRI study", type="primary", key="run_inference_button",
+)
 
 result_key = "last_result"
 if run_clicked:

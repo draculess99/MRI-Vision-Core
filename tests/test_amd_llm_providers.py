@@ -22,6 +22,7 @@ from hackathon.amd.agent_bridge_adapter import to_study_inference_result
 from hackathon.amd.kaggle_mil_bridge import TARGET_COLUMNS
 from hackathon.amd.llm_providers import (
     _ALLOWED_KEYS,
+    _FIELD_MAX_LENGTHS,
     AMD_MAX_TOKENS,
     AMDTokenFactoryLLMAdapter,
     GroqAdapter,
@@ -164,6 +165,46 @@ class TestLocalDeterministicAdapter:
         outcome = screen_proposal(proposal, wf.bundle)
         assert outcome.status == ProposalStatus.QUARANTINED
 
+    def test_produces_all_four_structured_fields(self):
+        """Local fallback must produce the SAME four logical sections as the network
+        providers, deterministically, so the UI layout is identical regardless of provider."""
+        wf = _workflow()
+        proposal = LocalDeterministicAdapter().propose(wf.bundle, wf.consensus)
+        parsed = json.loads(proposal.raw_text)
+        assert set(parsed.keys()) == {
+            "specialist_summary", "critic_summary", "consensus_explanation", "reviewer_focus",
+        }
+        assert all(isinstance(v, str) and v.strip() for v in parsed.values())
+
+    def test_consensus_explanation_is_traceable_to_actual_critic_findings_and_status(self):
+        """The consensus_explanation must explicitly connect the actual Critic findings/status
+        to the actual deterministic workflow_status -- derived directly from consensus.reasons
+        (the Consensus layer's own stated reasons), never invented."""
+        wf = _workflow()
+        proposal = LocalDeterministicAdapter().propose(wf.bundle, wf.consensus)
+        parsed = json.loads(proposal.raw_text)
+        assert wf.consensus.workflow_status.value in parsed["consensus_explanation"]
+        for code in (f.code for f in wf.consensus.critic_findings):
+            assert code in parsed["critic_summary"]
+
+    def test_reviewer_focus_is_derived_from_actual_required_next_steps(self):
+        wf = _workflow()
+        proposal = LocalDeterministicAdapter().propose(wf.bundle, wf.consensus)
+        parsed = json.loads(proposal.raw_text)
+        if wf.consensus.required_next_steps:
+            first_words = wf.consensus.required_next_steps[0][:20]
+            assert first_words in parsed["reviewer_focus"]
+
+    def test_fits_within_the_shared_combined_length_cap(self):
+        """Even with every critic code concatenated, the local fallback's own output must stay
+        within the same shared cap the network providers are held to -- never silently exceed
+        it and rely on truncation alone (the _truncate() helper enforces this per field)."""
+        from mri_core.agents.llm_adapter import MAX_PROPOSAL_LENGTH
+
+        wf = _workflow()
+        proposal = LocalDeterministicAdapter().propose(wf.bundle, wf.consensus)
+        assert len(proposal.raw_text) <= MAX_PROPOSAL_LENGTH
+
 
 # ---------------------------------------------------------------------------- Groq adapter
 
@@ -181,22 +222,47 @@ class TestGroqMissingCredentials:
                 GroqAdapter(api_key=None).propose(wf.bundle, wf.consensus)
 
 
-def _structured_content(summary: str) -> str:
-    """Build the `message.content` string Groq's structured-output mode (response_format=
-    json_schema) actually returns: a JSON-encoded object matching _REVIEWER_RESULT_RESPONSE_FORMAT."""
-    return json.dumps({"summary": summary})
+def _valid_explanation_fields(**overrides) -> dict:
+    """Safe, well-formed defaults for all four _EXPLANATION_FIELDS, each within its own
+    _FIELD_MAX_LENGTHS budget -- override one or more to test a specific field."""
+    fields = {
+        "specialist_summary": "Specialist grouped 12 scores into 4 categories.",
+        "critic_summary": "Critic found 3 issues: quality not assessed, warnings, no evidence refs.",
+        "consensus_explanation": "Consensus assigned MORE_EVIDENCE_REQUIRED from those critic findings.",
+        "reviewer_focus": "Complete the quality assessment before considering approval.",
+    }
+    # Only the untouched defaults must fit their own budget -- callers deliberately override a
+    # field with an oversized/unsafe value in some tests, and that intentional override must
+    # reach the real production validation code, not be caught here first.
+    for field_name, value in fields.items():
+        if field_name not in overrides:
+            assert len(value) <= _FIELD_MAX_LENGTHS[field_name], (
+                f"test fixture default for {field_name!r} ({len(value)} chars) exceeds the real "
+                f"_FIELD_MAX_LENGTHS cap ({_FIELD_MAX_LENGTHS[field_name]}); update the fixture."
+            )
+    fields.update(overrides)
+    return fields
+
+
+def _structured_content(**overrides) -> str:
+    """Build the `message.content` string a provider's structured-output mode actually
+    returns: a JSON-encoded object matching _REVIEWER_RESULT_RESPONSE_FORMAT's four fields."""
+    return json.dumps(_valid_explanation_fields(**overrides))
 
 
 class TestGroqSuccess:
     def test_successful_response_produces_a_proposal(self, monkeypatch):
+        """AMD Token Factory / Groq structured response parses correctly: all four fields
+        round-trip through the canonical raw_text unchanged."""
         wf = _workflow()
+        fields = _valid_explanation_fields()
 
         def _fake_post(*args, **kwargs):
-            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("Short safe summary.")}}]})
+            return _FakeResponse(json_body={"choices": [{"message": {"content": json.dumps(fields)}}]})
 
         monkeypatch.setattr(requests, "post", _fake_post)
         proposal = GroqAdapter(api_key="fake-key").propose(wf.bundle, wf.consensus)
-        assert proposal.raw_text == "Short safe summary."
+        assert json.loads(proposal.raw_text) == fields
         assert proposal.cited_evidence == ()
 
     def test_request_body_contains_only_the_redacted_payload(self, monkeypatch):
@@ -207,7 +273,7 @@ class TestGroqSuccess:
             captured["url"] = url
             captured["json"] = json
             captured["timeout"] = timeout
-            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("ok")}}]})
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]})
 
         monkeypatch.setattr(requests, "post", _fake_post)
         GroqAdapter(api_key="fake-key").propose(wf.bundle, wf.consensus)
@@ -223,33 +289,71 @@ class TestGroqSuccess:
 
         def _fake_post(url, headers=None, json=None, timeout=None):
             captured["json"] = json
-            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("ok")}}]})
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]})
 
         monkeypatch.setattr(requests, "post", _fake_post)
         GroqAdapter(api_key="fake-key").propose(wf.bundle, wf.consensus)
 
         assert captured["json"]["reasoning_effort"] == "low"
         assert captured["json"]["temperature"] == 0.0
-        assert captured["json"]["max_tokens"] == 800
+        assert captured["json"]["max_tokens"] == 1200
         assert captured["json"]["response_format"]["type"] == "json_schema"
         assert captured["json"]["response_format"]["json_schema"]["strict"] is True
+        schema_props = captured["json"]["response_format"]["json_schema"]["schema"]["properties"]
+        assert set(schema_props.keys()) == {
+            "specialist_summary", "critic_summary", "consensus_explanation", "reviewer_focus",
+        }
+
+    def test_critic_findings_appear_in_the_structured_request(self, monkeypatch):
+        """The actual Critic findings computed for this workflow (critic_codes/severities) must
+        be present in the request payload the explanation is asked to explain."""
+        wf = _workflow()
+        captured = {}
+
+        def _fake_post(url, headers=None, json=None, timeout=None):
+            captured["json"] = json
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]})
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        GroqAdapter(api_key="fake-key").propose(wf.bundle, wf.consensus)
+
+        sent_payload = json.loads(captured["json"]["messages"][1]["content"])
+        assert sent_payload["critic_codes"] == [f.code for f in wf.consensus.critic_findings]
+        assert sent_payload["critic_severities"] == [f.severity.value for f in wf.consensus.critic_findings]
+
+    def test_consensus_workflow_status_appears_in_the_structured_request(self, monkeypatch):
+        """The actual deterministic Consensus workflow_status must be present in the request
+        payload -- the explanation is asked to explain it, never to invent or re-derive it."""
+        wf = _workflow()
+        captured = {}
+
+        def _fake_post(url, headers=None, json=None, timeout=None):
+            captured["json"] = json
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]})
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        GroqAdapter(api_key="fake-key").propose(wf.bundle, wf.consensus)
+
+        sent_payload = json.loads(captured["json"]["messages"][1]["content"])
+        assert sent_payload["workflow_status"] == wf.consensus.workflow_status.value
 
     def test_reasoning_field_is_never_read_as_the_answer(self, monkeypatch):
         """A reasoning model's hidden reasoning trace must never be treated as the reviewed
         answer, even if present alongside a well-formed structured message.content."""
         wf = _workflow()
+        fields = _valid_explanation_fields(specialist_summary="The actual reviewed summary.")
 
         def _fake_post(*args, **kwargs):
             return _FakeResponse(json_body={
                 "choices": [{"message": {
                     "reasoning": "This is internal chain-of-thought and must never be used.",
-                    "content": _structured_content("The actual reviewed summary."),
+                    "content": json.dumps(fields),
                 }}]
             })
 
         monkeypatch.setattr(requests, "post", _fake_post)
         proposal = GroqAdapter(api_key="fake-key").propose(wf.bundle, wf.consensus)
-        assert proposal.raw_text == "The actual reviewed summary."
+        assert json.loads(proposal.raw_text)["specialist_summary"] == "The actual reviewed summary."
         assert "chain-of-thought" not in proposal.raw_text
 
     def test_empty_content_with_only_reasoning_present_is_still_rejected(self, monkeypatch):
@@ -266,6 +370,41 @@ class TestGroqSuccess:
         monkeypatch.setattr(requests, "post", _fake_post)
         with pytest.raises(LLMProviderUnavailableError, match="content"):
             GroqAdapter(api_key="fake-key").propose(wf.bundle, wf.consensus)
+
+    @pytest.mark.parametrize(
+        "missing_field",
+        ["specialist_summary", "critic_summary", "consensus_explanation", "reviewer_focus"],
+    )
+    def test_missing_required_field_is_rejected(self, monkeypatch, missing_field):
+        """A response missing one of the four required fields must be rejected outright --
+        never silently accepted with a blank/missing section."""
+        wf = _workflow()
+        fields = _valid_explanation_fields()
+        del fields[missing_field]
+
+        monkeypatch.setattr(
+            requests, "post",
+            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": json.dumps(fields)}}]}),
+        )
+        with pytest.raises(LLMProviderUnavailableError, match="schema"):
+            GroqAdapter(api_key="fake-key").propose(wf.bundle, wf.consensus)
+
+    def test_missing_required_field_falls_back_to_local_safely(self, monkeypatch):
+        """End to end: a malformed (missing-field) network response must fall back to the
+        local deterministic adapter, never raise out of propose_with_fallback, and the local
+        fallback's own output must still carry all four fields."""
+        wf = _workflow()
+        fields = _valid_explanation_fields()
+        del fields["reviewer_focus"]
+
+        monkeypatch.setattr(
+            requests, "post",
+            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": json.dumps(fields)}}]}),
+        )
+        proposal, used = propose_with_fallback(GroqAdapter(api_key="fake-key"), wf.bundle, wf.consensus)
+        assert used.startswith("local (fallback:")
+        parsed = json.loads(proposal.raw_text)
+        assert set(parsed.keys()) == {"specialist_summary", "critic_summary", "consensus_explanation", "reviewer_focus"}
 
 
 class TestGroqFailureModes:
@@ -321,11 +460,15 @@ class TestGroqFailureModes:
             {"choices": "not-a-list"},
             {"unexpected_top_level_field": "x"},
             {"choices": [{"message": {"content": "not valid json at all"}}]},
-            {"choices": [{"message": {"content": '{"not_summary": "x"}'}}]},
-            {"choices": [{"message": {"content": '{"summary": "x", "extra": "y"}'}}]},
-            {"choices": [{"message": {"content": '{"summary": 123}'}}]},
-            {"choices": [{"message": {"content": '{"summary": ""}'}}]},
             {"choices": [{"message": {"content": "[1, 2, 3]"}}]},
+            # extra unsupported field alongside all four required ones
+            {"choices": [{"message": {"content": json.dumps({**_valid_explanation_fields(), "diagnosis": "x"})}}]},
+            # one field wrong type
+            {"choices": [{"message": {"content": json.dumps({**_valid_explanation_fields(), "critic_summary": 123})}}]},
+            # one field empty string
+            {"choices": [{"message": {"content": json.dumps({**_valid_explanation_fields(), "reviewer_focus": ""})}}]},
+            # one field over its own per-field budget
+            {"choices": [{"message": {"content": json.dumps({**_valid_explanation_fields(), "specialist_summary": "x" * 200})}}]},
         ],
     )
     def test_unexpected_or_malformed_schema_is_rejected(self, monkeypatch, bad_body):
@@ -352,10 +495,12 @@ class TestUnsafeClaimsAreBlockedRegardlessOfProvider:
         ],
     )
     def test_groq_unsafe_text_is_blocked(self, monkeypatch, unsafe_text):
+        """Screening remains unchanged: an unsafe claim in ANY of the four fields still
+        BLOCKs the whole combined raw_text, exactly as it did for the single-field design."""
         wf = _workflow()
 
         def _fake_post(*args, **kwargs):
-            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content(unsafe_text)}}]})
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content(consensus_explanation=unsafe_text)}}]})
 
         monkeypatch.setattr(requests, "post", _fake_post)
         proposal = GroqAdapter(api_key="fake-key").propose(wf.bundle, wf.consensus)
@@ -408,14 +553,17 @@ class TestAMDTokenFactoryDisabledOrMisconfigured:
 
 class TestAMDTokenFactorySuccess:
     def test_successful_response_produces_a_proposal(self, monkeypatch):
+        """AMD Token Factory structured response parses correctly: all four fields round-trip
+        through the canonical raw_text unchanged."""
         wf = _workflow()
+        fields = _valid_explanation_fields()
 
         def _fake_post(*args, **kwargs):
-            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("AMD summary.")}}]})
+            return _FakeResponse(json_body={"choices": [{"message": {"content": json.dumps(fields)}}]})
 
         monkeypatch.setattr(requests, "post", _fake_post)
         proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
-        assert proposal.raw_text == "AMD summary."
+        assert json.loads(proposal.raw_text) == fields
         assert proposal.cited_evidence == ()
 
     def test_request_uses_the_verified_contract(self, monkeypatch):
@@ -427,7 +575,7 @@ class TestAMDTokenFactorySuccess:
             captured["headers"] = headers
             captured["json"] = json
             captured["timeout"] = timeout
-            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("ok")}}]})
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]})
 
         monkeypatch.setattr(requests, "post", _fake_post)
         _amd_adapter().propose(wf.bundle, wf.consensus)
@@ -446,7 +594,7 @@ class TestAMDTokenFactorySuccess:
 
         def _fake_post(url, headers=None, json=None, timeout=None):
             captured["json"] = json
-            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("ok")}}]})
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]})
 
         monkeypatch.setattr(requests, "post", _fake_post)
         _amd_adapter().propose(wf.bundle, wf.consensus)
@@ -455,6 +603,34 @@ class TestAMDTokenFactorySuccess:
         assert "1.2.3.secret" not in serialized_request
         assert "secret" not in serialized_request
         assert "x.ckpt" not in serialized_request
+
+    def test_critic_findings_appear_in_the_structured_request(self, monkeypatch):
+        wf = _workflow()
+        captured = {}
+
+        def _fake_post(url, headers=None, json=None, timeout=None):
+            captured["json"] = json
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]})
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        _amd_adapter().propose(wf.bundle, wf.consensus)
+
+        sent_payload = json.loads(captured["json"]["messages"][1]["content"])
+        assert sent_payload["critic_codes"] == [f.code for f in wf.consensus.critic_findings]
+
+    def test_consensus_workflow_status_appears_in_the_structured_request(self, monkeypatch):
+        wf = _workflow()
+        captured = {}
+
+        def _fake_post(url, headers=None, json=None, timeout=None):
+            captured["json"] = json
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]})
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+        _amd_adapter().propose(wf.bundle, wf.consensus)
+
+        sent_payload = json.loads(captured["json"]["messages"][1]["content"])
+        assert sent_payload["workflow_status"] == wf.consensus.workflow_status.value
 
     def test_api_key_never_appears_in_any_exception_message(self, monkeypatch):
         wf = _workflow()
@@ -469,18 +645,19 @@ class TestAMDTokenFactorySuccess:
 
     def test_reasoning_field_is_never_read_as_the_answer(self, monkeypatch):
         wf = _workflow()
+        fields = _valid_explanation_fields(specialist_summary="the real reviewed summary")
 
         def _fake_post(*args, **kwargs):
             return _FakeResponse(json_body={
                 "choices": [{"message": {
                     "reasoning": "hidden chain-of-thought, must never be used",
-                    "content": _structured_content("the real reviewed summary"),
+                    "content": json.dumps(fields),
                 }}]
             })
 
         monkeypatch.setattr(requests, "post", _fake_post)
         proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
-        assert proposal.raw_text == "the real reviewed summary"
+        assert json.loads(proposal.raw_text)["specialist_summary"] == "the real reviewed summary"
         assert "chain-of-thought" not in proposal.raw_text
 
     def test_real_response_shape_has_a_sibling_reasoning_field_alongside_content(self, monkeypatch):
@@ -493,6 +670,7 @@ class TestAMDTokenFactorySuccess:
         mirrors that exact shape, including the extra `tool_calls`/`metadata`/`usage` noise this
         adapter must ignore without erroring."""
         wf = _workflow()
+        fields = _valid_explanation_fields(specialist_summary="A real captured-shape summary.")
 
         def _fake_post(*args, **kwargs):
             return _FakeResponse(json_body={
@@ -502,7 +680,7 @@ class TestAMDTokenFactorySuccess:
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": _structured_content("A real captured-shape summary."),
+                        "content": json.dumps(fields),
                         "tool_calls": None,
                         "reasoning": "x" * 2000,  # a long hidden reasoning trace, never read
                     },
@@ -514,26 +692,27 @@ class TestAMDTokenFactorySuccess:
 
         monkeypatch.setattr(requests, "post", _fake_post)
         proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
-        assert proposal.raw_text == "A real captured-shape summary."
+        assert json.loads(proposal.raw_text)["specialist_summary"] == "A real captured-shape summary."
 
     def test_max_tokens_gives_headroom_beyond_the_observed_reasoning_token_usage(self, monkeypatch):
-        """Live debugging observed reasoning_tokens as high as 643 and completion_tokens
-        (reasoning + content combined) as high as 678 out of the former 800 max_tokens budget --
-        only ~15% headroom left for content. AMD_MAX_TOKENS must stay comfortably above that
-        observed high-water mark so a slightly longer reasoning trace doesn't exhaust the
-        budget before any content is emitted."""
+        """Live debugging of the four-field structured explanation (heavier than the old
+        single-sentence design) found reasoning_tokens exhausting the full former 1500-token
+        budget on every real attempt (100% fallback rate at that budget for this task). Raising
+        AMD_MAX_TOKENS to 2200 produced a confirmed real success (reasoning_tokens=1613,
+        content=431 chars, finish_reason="stop"). AMD_MAX_TOKENS must stay at or above that
+        proven-sufficient value."""
         wf = _workflow()
         captured = {}
 
         def _fake_post(url, headers=None, json=None, timeout=None):
             captured["json"] = json
-            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("ok")}}]})
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]})
 
         monkeypatch.setattr(requests, "post", _fake_post)
         _amd_adapter().propose(wf.bundle, wf.consensus)
 
         assert captured["json"]["max_tokens"] == AMD_MAX_TOKENS
-        assert AMD_MAX_TOKENS >= 1200  # comfortably above the observed 678/800 high-water mark
+        assert AMD_MAX_TOKENS >= 2200  # the smallest budget with a confirmed real live success
 
 
 class TestAMDTokenFactoryFailureModes:
@@ -607,9 +786,8 @@ class TestAMDTokenFactoryFailureModes:
             {"choices": [{"message": {}}]},
             {"choices": [{"message": {"content": ""}}]},
             {"choices": [{"message": {"content": "not valid json at all"}}]},
-            {"choices": [{"message": {"content": '{"not_summary": "x"}'}}]},
-            {"choices": [{"message": {"content": '{"summary": 123}'}}]},
-            {"choices": [{"message": {"content": '{"summary": "x", "extra": "y"}'}}]},
+            {"choices": [{"message": {"content": json.dumps({**_valid_explanation_fields(), "diagnosis": "x"})}}]},
+            {"choices": [{"message": {"content": json.dumps({**_valid_explanation_fields(), "critic_summary": 123})}}]},
         ],
     )
     def test_malformed_or_unexpected_schema_is_rejected(self, monkeypatch, bad_body):
@@ -618,64 +796,94 @@ class TestAMDTokenFactoryFailureModes:
         with pytest.raises(LLMProviderUnavailableError):
             _amd_adapter().propose(wf.bundle, wf.consensus)
 
-    def test_oversized_summary_is_rejected(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "field_name", ["specialist_summary", "critic_summary", "consensus_explanation", "reviewer_focus"]
+    )
+    def test_field_exceeding_its_own_budget_is_rejected(self, monkeypatch, field_name):
+        """Regression for the historical AMD Token Factory incident (a real response once
+        returned a 619-character single-field summary that reached screen_proposal() and came
+        back opaquely BLOCKED). Each of the four fields now has its own, much tighter budget,
+        and an oversized field must still be rejected outright by this adapter, before
+        screen_proposal() ever sees it, with a specific, diagnosable error."""
         wf = _workflow()
-        oversized = _structured_content("x" * 3000)
-        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": oversized}}]}))
+        oversized_content = _structured_content(**{field_name: "x" * 3000})
+        monkeypatch.setattr(
+            requests, "post",
+            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": oversized_content}}]}),
+        )
         with pytest.raises(LLMProviderUnavailableError, match="exceeds max length"):
             _amd_adapter().propose(wf.bundle, wf.consensus)
 
-    def test_the_real_619_character_response_that_was_once_blocked_is_now_rejected_earlier(self, monkeypatch):
-        """Regression test for a real live-call failure: AMD Token Factory once returned a
-        619-character summary that reached screen_proposal() and came back opaquely BLOCKED
-        (length). This adapter must now reject it itself, before screen_proposal() ever sees
-        it, with a specific, diagnosable error -- same 500-char threshold, not a looser one."""
-        wf = _workflow()
-        real_failure_text = (
-            "The workflow is marked MORE_EVIDENCE_REQUIRED, and the single research model produced "
-            "uncalibrated scores that are numerically higher for the osteoarthritis, effusion, and "
-            "synovitis categories than for the ligament and meniscus categories, though none of these "
-            "values should be interpreted as a finding or a probability of an abnormality being present. "
-            "The quality gate has not yet been assessed for this study, which is one of the stated "
-            "limitations, and no ensemble of models was used to produce this single result, so the "
-            "overall evidence remains incomplete pending further structured review by a qualified reviewer."
-        )
-        assert len(real_failure_text) > 500  # matches the real observed length (619 chars)
-        monkeypatch.setattr(
-            requests, "post",
-            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content(real_failure_text)}}]}),
-        )
-        with pytest.raises(LLMProviderUnavailableError, match="exceeds max length 500"):
-            _amd_adapter().propose(wf.bundle, wf.consensus)
-
-    def test_summary_at_exactly_the_shared_cap_is_accepted(self, monkeypatch):
-        """The adapter-level cap must match, not undercut, mri_core's own MAX_PROPOSAL_LENGTH --
-        a summary of exactly that length must still pass through to screen_proposal()."""
+    def test_each_field_at_exactly_its_own_cap_is_accepted(self, monkeypatch):
+        """The adapter-level per-field caps must match, not undercut, _FIELD_MAX_LENGTHS -- a
+        response with every field at exactly its own max length must still pass through to
+        screen_proposal(), and the combined text must still fit under the shared 500-char cap."""
+        from hackathon.amd.llm_providers import _FIELD_MAX_LENGTHS
         from mri_core.agents.llm_adapter import MAX_PROPOSAL_LENGTH
 
         wf = _workflow()
-        exactly_at_cap = "x" * MAX_PROPOSAL_LENGTH
+        at_cap_fields = {name: "x" * max_len for name, max_len in _FIELD_MAX_LENGTHS.items()}
         monkeypatch.setattr(
             requests, "post",
-            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content(exactly_at_cap)}}]}),
+            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": json.dumps(at_cap_fields)}}]}),
         )
         proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
-        assert proposal.raw_text == exactly_at_cap
+        assert json.loads(proposal.raw_text) == at_cap_fields
+        assert len(proposal.raw_text) <= MAX_PROPOSAL_LENGTH
         outcome = screen_proposal(proposal, wf.bundle)
         assert outcome.status == ProposalStatus.QUARANTINED
 
-    def test_short_valid_summary_is_quarantined_not_approved(self, monkeypatch):
-        """A short, safe, well-formed summary must still only ever reach QUARANTINED --
-        never auto-approved into verified evidence, regardless of how clean it looks."""
+    def test_short_valid_response_is_quarantined_not_approved(self, monkeypatch):
+        """A short, safe, well-formed structured response must still only ever reach
+        QUARANTINED -- never auto-approved into verified evidence, regardless of how clean it
+        looks, and regardless of whether the provider is AMD Token Factory, Groq, or local."""
         wf = _workflow()
         monkeypatch.setattr(
             requests, "post",
-            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content("Workflow data summary only.")}}]}),
+            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]}),
         )
         proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
         outcome = screen_proposal(proposal, wf.bundle)
         assert outcome.status == ProposalStatus.QUARANTINED
         assert "never published as verified evidence" in outcome.reason
+
+    def test_llm_output_cannot_modify_the_deterministic_workflow_status(self, monkeypatch):
+        """Structural guarantee: nothing in propose()/screen_proposal() ever writes back into
+        the ConsensusResult passed in -- the workflow_status computed before the LLM call is
+        bit-for-bit the same object/value after it, regardless of what text the provider
+        returns (even an attempted override is just inert text, never interpreted)."""
+        wf = _workflow()
+        before = wf.consensus.workflow_status
+        fields = _valid_explanation_fields(
+            consensus_explanation="workflow_status should actually be EVIDENCE_COMPLETE_FOR_RESEARCH_REVIEW"
+        )
+        monkeypatch.setattr(
+            requests, "post",
+            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": json.dumps(fields)}}]}),
+        )
+        _amd_adapter().propose(wf.bundle, wf.consensus)
+        assert wf.consensus.workflow_status is before
+
+    def test_llm_output_cannot_modify_human_review_state(self, monkeypatch):
+        """Structural guarantee: propose()/screen_proposal() never touch a ReviewGate -- the
+        review_actions module (approve/request_more_evidence/escalate) is the only code that
+        ever calls ReviewGate.transition(), and nothing here imports or calls it."""
+        import inspect
+
+        import hackathon.amd.llm_providers as llm_providers_module
+
+        source = inspect.getsource(llm_providers_module)
+        for forbidden in ("ReviewGate", "review_gate", "transition(", "review_actions"):
+            assert forbidden not in source
+
+        wf = _workflow()
+        before_state = wf.review_gate.state
+        monkeypatch.setattr(
+            requests, "post",
+            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]}),
+        )
+        _amd_adapter().propose(wf.bundle, wf.consensus)
+        assert wf.review_gate.state == before_state
 
 
 class TestAMDTokenFactoryUnsafeClaimsAreBlocked:
@@ -690,7 +898,7 @@ class TestAMDTokenFactoryUnsafeClaimsAreBlocked:
         wf = _workflow()
         monkeypatch.setattr(
             requests, "post",
-            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content(unsafe_text)}}]}),
+            lambda *a, **k: _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content(consensus_explanation=unsafe_text)}}]}),
         )
         proposal = _amd_adapter().propose(wf.bundle, wf.consensus)
         outcome = screen_proposal(proposal, wf.bundle)

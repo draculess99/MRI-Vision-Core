@@ -49,6 +49,11 @@ kaggle_checkpoints_tmp/
 *.tar
 *.pt
 *.pth
+*.ckpt
 *.npz
 kaggle.json
 credentials.json
+
+# pytest's own cache (also self-excluded by its auto-generated .pytest_cache/.gitignore,
+# but listed explicitly here so that protection doesn't depend on that file existing).
+.pytest_cache/

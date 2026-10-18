@@ -164,7 +164,7 @@ class TestCuratedBenchmarkScenarios:
         selector.set_value(selector.options[0]).run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
-        assert "benchmark_run_inference_button" not in [b.key for b in at.button]
+        assert "run_inference_button" not in [b.key for b in at.button]
         assert "last_result" not in at.session_state
 
     def test_no_data_root_shows_cannot_check_availability_not_a_crash(self, no_env):
@@ -193,12 +193,16 @@ class TestCuratedBenchmarkScenarios:
             "cannot be run for this scenario" in w.value
             for w in at.warning
         )
-        assert "benchmark_run_inference_button" not in [b.key for b in at.button]
+        # Not pre-selected in the single "Run trained inference" selectbox below, since this
+        # scenario's study is not among the locally available ones.
+        assert at.selectbox(key="study_select").value != "1.2.826.0.1.3680043.8.498.69392348385274125385290015404144639002"
 
     @requires_real_assets
     def test_available_study_shows_success_and_offers_to_run_real_inference(self, real_env):
         """AMD-001's study is present in this session's real local data_root -- confirmed
-        separately via mri_core.rsna_integration.discover_available_studies()."""
+        separately via mri_core.rsna_integration.discover_available_studies(). There is exactly
+        one inference button on the page (no separate benchmark-section button), and it is
+        pre-selected to this scenario's study."""
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         selector = at.selectbox(key="benchmark_scenario_select")
@@ -207,11 +211,16 @@ class TestCuratedBenchmarkScenarios:
 
         assert not at.exception
         assert any("is available locally under the configured data_root" in s.value for s in at.success)
-        assert "benchmark_run_inference_button" in [b.key for b in at.button]
+        inference_buttons = [b for b in at.button if "inference" in (b.label or "").lower()]
+        assert len(inference_buttons) == 1
+        assert inference_buttons[0].key == "run_inference_button"
+        assert inference_buttons[0].label == "Run trained inference on selected MRI study"
+        assert at.selectbox(key="study_select").value == "1.2.826.0.1.3680043.8.498.11287937729196958426538087439102017580"
 
     @requires_real_assets
     def test_running_inference_from_a_scenario_reuses_the_existing_real_inference_path(self, real_env):
-        """Clicking the benchmark's run-inference button must populate the exact same
+        """Clicking the single, shared inference button after selecting a scenario must run
+        inference on THAT scenario's pre-selected study and populate the exact same
         session-state the main real-inference path reads from -- proving this is the same
         underlying call, not a second, duplicate inference implementation."""
         at = AppTest.from_file(APP_PATH)
@@ -219,21 +228,27 @@ class TestCuratedBenchmarkScenarios:
         selector = at.selectbox(key="benchmark_scenario_select")
         amd_001 = next(o for o in selector.options if o.startswith("AMD-001 — "))
         selector.set_value(amd_001).run(timeout=RUN_TIMEOUT)
-        at.button(key="benchmark_run_inference_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
-        assert any("Real inference complete" in s.value for s in at.success)
+        state = at.session_state["last_result"]
+        assert state["study_uid"] == "1.2.826.0.1.3680043.8.498.11287937729196958426538087439102017580"
         # The main real-inference panel (rendered by the same render_workflow() used
         # everywhere else) is now showing this scenario's result.
         assert any("real_approve_button" == b.key for b in at.button)
 
 
 class TestNoConfiguration:
-    def test_amd_token_factory_is_unchecked_by_default(self, no_env):
+    def test_hardware_execution_sidebar_block_is_not_shown(self, no_env):
+        """The redundant "Execution provider (hardware, not AI text)" sidebar block (an
+        unimplemented status/UI seam, unrelated to the real, working LLM provider integration)
+        was removed as judge-facing UI cleanup -- it never dispatched inference to AMD hardware
+        and only duplicated/confused the actual 'Optional LLM interpretation' section below."""
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
-        assert at.checkbox(key="amd_enabled_checkbox").value is False
-        assert any("disabled by default" in c.value for c in at.caption)
+        assert "amd_enabled_checkbox" not in [cb.key for cb in at.checkbox]
+        assert not any("Execution provider" in h.value for h in at.header)
+        assert not any("hardware execution" in c.value for c in at.caption)
 
 
 class TestDataPathPrefillAndValidation:
@@ -416,7 +431,8 @@ class TestOptionalLLMSection:
 
         assert not at.exception
         assert any("Produced by: local" in c.value for c in at.caption)
-        assert any(w.value.startswith("QUARANTINED") for w in at.warning)
+        assert any("LLM interpretation generated — human review required" in i.value for i in at.info)
+        assert any(c.value.startswith("Status: QUARANTINED") for c in at.caption)
 
     def test_ambient_groq_api_key_alone_does_not_authorize_a_call(self, real_env, monkeypatch):
         """Regression test for the exact incident this feature fixes: a real-looking
@@ -463,13 +479,18 @@ class TestOptionalLLMSection:
 
         import requests
 
+        structured_fields = {
+            "specialist_summary": "Specialist grouped 12 scores into 4 categories.",
+            "critic_summary": "Critic found 1 issue: QUALITY_NOT_ASSESSED.",
+            "consensus_explanation": "Consensus assigned MORE_EVIDENCE_REQUIRED from that finding.",
+            "reviewer_focus": "Complete the quality assessment before approval.",
+        }
+
         class _FakeResponse:
             status_code = 200
 
             def json(self):
-                return {"choices": [{"message": {
-                    "content": _json.dumps({"summary": "Deterministic workflow summary only."}),
-                }}]}
+                return {"choices": [{"message": {"content": _json.dumps(structured_fields)}}]}
 
         monkeypatch.setenv("GROQ_API_KEY", "fake-test-key")
         monkeypatch.setenv("LLM_PROVIDER", "groq")
@@ -484,7 +505,14 @@ class TestOptionalLLMSection:
 
         assert not at.exception
         assert any("Produced by: groq" in c.value for c in at.caption)
-        assert any("Deterministic workflow summary only." in m.value for m in at.markdown)
+        # All four structured sections render, each under its own heading.
+        headings = [h.value for h in at.markdown if h.value.startswith("#####")]
+        assert any("Specialist explanation" in h for h in headings)
+        assert any("Critic explanation" in h for h in headings)
+        assert any("Consensus explanation" in h for h in headings)
+        assert any("Reviewer focus" in h for h in headings)
+        for text in structured_fields.values():
+            assert any(text in m.value for m in at.markdown)
 
     def test_amd_token_factory_falls_back_to_local_when_misconfigured(self, real_env, monkeypatch):
         """Missing AMD_TOKENFACTORY_MODEL (one of the four required fields) must route to
@@ -521,13 +549,18 @@ class TestOptionalLLMSection:
 
         import requests
 
+        structured_fields = {
+            "specialist_summary": "Mocked AMD specialist summary.",
+            "critic_summary": "Mocked AMD critic summary.",
+            "consensus_explanation": "Mocked AMD consensus explanation.",
+            "reviewer_focus": "Mocked AMD reviewer focus.",
+        }
+
         class _FakeResponse:
             status_code = 200
 
             def json(self):
-                return {"choices": [{"message": {
-                    "content": _json.dumps({"summary": "Mocked AMD Token Factory summary."}),
-                }}]}
+                return {"choices": [{"message": {"content": _json.dumps(structured_fields)}}]}
 
         monkeypatch.setenv("LLM_PROVIDER", "amd_token_factory")
         monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
@@ -545,7 +578,16 @@ class TestOptionalLLMSection:
 
         assert not at.exception
         assert any("Produced by: amd_token_factory" in c.value for c in at.caption)
-        assert any("Mocked AMD Token Factory summary." in m.value for m in at.markdown)
+        assert any("LLM interpretation generated — human review required" in i.value for i in at.info)
+        headings = [h.value for h in at.markdown if h.value.startswith("#####")]
+        assert any("Specialist explanation" in h for h in headings)
+        assert any("Critic explanation" in h for h in headings)
+        assert any("Consensus explanation" in h for h in headings)
+        assert any("Reviewer focus" in h for h in headings)
+        for text in structured_fields.values():
+            assert any(text in m.value for m in at.markdown)
+        # Human review state is unaffected by the LLM call.
+        assert any("Current state: `PENDING_REVIEW`" in m.value for m in at.markdown)
 
     def test_amd_token_factory_mocked_failure_falls_back_to_local_not_groq(self, real_env, monkeypatch):
         """Even with Groq also fully configured in the environment, an AMD failure must fall
