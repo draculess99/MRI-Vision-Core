@@ -23,6 +23,7 @@ score verbatim, a deterministic structural check, or a simulated workflow/review
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -43,6 +44,9 @@ from hackathon.amd.benchmark_scenarios import BenchmarkScenarioError, build_labe
 from hackathon.amd.data_config import resolve_data_paths, validate_data_paths
 from hackathon.amd.kaggle_mil_bridge import BridgeError, load_bridge_checkpoint, run_study_inference
 from hackathon.amd.llm_config import build_adapter, resolve_llm_config
+from hackathon.amd.public_demo_cases import (
+    PublicDemoCasesError, build_case_inputs, case_label, load_public_demo_cases,
+)
 from hackathon.amd.llm_providers import LocalDeterministicAdapter, propose_with_fallback
 from hackathon.amd.review_actions import approve, escalate, is_escalation, request_more_evidence
 from hackathon.amd.run_real_checkpoint_smoke import NON_DIAGNOSTIC_NOTICE, pick_study_and_series, sha256_of_file
@@ -125,6 +129,15 @@ def _run_inference(data_root: Path, checkpoint_path: Path, study_uid: str | None
     return study_uid, series_uid, plane, result, model_provenance
 
 
+PUBLIC_DEMO_ENV_VAR = "AMD_PUBLIC_DEMO_MODE"
+
+
+def _public_demo_mode_enabled() -> bool:
+    """Public synthetic-demo mode is automatic when no real data_root/checkpoint is configured;
+    AMD_PUBLIC_DEMO_MODE=false opts out (metadata-only behavior)."""
+    return os.environ.get(PUBLIC_DEMO_ENV_VAR, "auto").strip().lower() not in ("false", "0", "no", "off")
+
+
 def _gate_session_key(fingerprint: str) -> str:
     return f"review_gate::{fingerprint}"
 
@@ -136,7 +149,11 @@ def _get_or_create_gate(fingerprint: str) -> ReviewGate:
     return st.session_state[key]
 
 
-def render_workflow(result, *, key_prefix: str, extra_provenance: dict | None = None) -> None:
+def render_workflow(
+    result, *, key_prefix: str, extra_provenance: dict | None = None,
+    quality_gate_status: QualityGateStatus = QualityGateStatus.NOT_ASSESSED,
+    evidence_references: tuple = (), show_scores: bool = True, force_local_llm: bool = False,
+) -> None:
     """Render scores -> evidence review -> human review gate -> optional LLM panel for one
     StudyInferenceResult. Used identically for the real bridged-inference result and the
     synthetic demonstration result below -- the only difference between the two call sites is
@@ -153,30 +170,36 @@ def render_workflow(result, *, key_prefix: str, extra_provenance: dict | None = 
     for warning in result.warnings:
         st.warning(warning)
 
-    col_scores, col_provenance = st.columns([2, 1])
-    with col_scores:
-        st.markdown("**12 research-model output scores (raw, uncalibrated sigmoid outputs)**")
-        st.bar_chart(result.probabilities)
-        st.table({"target": list(result.probabilities), "score": [f"{v:.4f}" for v in result.probabilities.values()]})
+    if show_scores:
+        col_scores, col_provenance = st.columns([2, 1])
+        with col_scores:
+            st.markdown("**12 research-model output scores (raw, uncalibrated sigmoid outputs)**")
+            st.bar_chart(result.probabilities)
+            st.table({"target": list(result.probabilities), "score": [f"{v:.4f}" for v in result.probabilities.values()]})
 
-    with col_provenance:
-        st.markdown("**Checkpoint provenance**")
-        provenance = result.model_provenance[0]
-        st.json(provenance.to_dict())
-        if extra_provenance is not None:
-            st.markdown("**Bridge-specific metadata**")
-            st.json(extra_provenance)
+        with col_provenance:
+            st.markdown("**Checkpoint provenance**")
+            provenance = result.model_provenance[0]
+            st.json(provenance.to_dict())
+            if extra_provenance is not None:
+                st.markdown("**Bridge-specific metadata**")
+                st.json(extra_provenance)
+    else:
+        st.caption("Synthetic placeholder inputs are intentionally not displayed as scores.")
 
     st.divider()
     st.subheader("Shared evidence review (mri_core.agents, unmodified)")
-    workflow = process_inference_result(result, quality_gate_status=QualityGateStatus.NOT_ASSESSED)
+    workflow = process_inference_result(
+        result, quality_gate_status=quality_gate_status, evidence_references=tuple(evidence_references),
+    )
 
     col_specialist, col_critic, col_consensus = st.columns(3)
     with col_specialist:
         st.markdown("**Specialist summaries**")
         for summary in workflow.specialist_summaries:
             st.markdown(f"_{summary.group_name}_: {summary.note}")
-            st.json(summary.scores)
+            if show_scores:
+                st.json(summary.scores)
     with col_critic:
         st.markdown("**Critic findings**")
         if workflow.critic_findings:
@@ -250,17 +273,21 @@ def render_workflow(result, *, key_prefix: str, extra_provenance: dict | None = 
     )
 
     llm_config = resolve_llm_config()
-    st.caption(
-        f"Configured via environment/.env — provider: `{llm_config.provider}`, "
-        f"external calls allowed: `{llm_config.allow_external_calls}`, "
-        f"GROQ_API_KEY present: `{bool(llm_config.groq_api_key)}`. "
-        "A credential being present is never enough on its own — LLM_ALLOW_EXTERNAL_CALLS must "
-        "also be explicitly true. See .env.example."
-    )
+    if force_local_llm:
+        st.caption("Public demonstration: local deterministic text only -- no external provider, API key or network.")
+    else:
+        st.caption(
+            f"Configured via environment/.env — provider: `{llm_config.provider}`, "
+            f"external calls allowed: `{llm_config.allow_external_calls}`, "
+            f"GROQ_API_KEY present: `{bool(llm_config.groq_api_key)}`. "
+            "A credential being present is never enough on its own — LLM_ALLOW_EXTERNAL_CALLS must "
+            "also be explicitly true. See .env.example."
+        )
 
-    llm_provider_choice = st.radio(
+    llm_provider_options = ["Local (default, no network)", "Groq (requires GROQ_API_KEY)", "AMD Token Factory (LLM reasoning, requires .env config)"]
+    llm_provider_choice = llm_provider_options[0] if force_local_llm else st.radio(
         "Try LLM text provider",
-        ["Local (default, no network)", "Groq (requires GROQ_API_KEY)", "AMD Token Factory (LLM reasoning, requires .env config)"],
+        llm_provider_options,
         key=k("llm_provider_choice"),
         help="This only has an effect if it matches the environment-configured provider above "
              "AND external calls are allowed there; otherwise it always falls back to local. "
@@ -274,7 +301,9 @@ def render_workflow(result, *, key_prefix: str, extra_provenance: dict | None = 
     )
 
     if st.button("Generate LLM interpretation", key=k("llm_generate_button")):
-        if intended_provider == llm_config.provider:
+        if force_local_llm:
+            primary, build_reason = LocalDeterministicAdapter(), "Public demonstration: using local deterministic mode only."
+        elif intended_provider == llm_config.provider:
             primary, build_reason = build_adapter(llm_config)
         else:
             primary, build_reason = LocalDeterministicAdapter(), (
@@ -364,6 +393,40 @@ with st.sidebar:
         help="A foldN-knee-mil-best.ckpt file. Prefilled from AMD_KAGGLE_CHECKPOINT "
              "(environment or .env). Override freely.",
     )
+
+
+def render_public_demo() -> None:
+    """Public synthetic-demo mode: synthetic cases only -- no MRI model, DICOM, checkpoint, API or
+    network. Runs the unmodified deterministic specialist -> critic -> consensus -> human-gate flow."""
+    st.warning(
+        "**Synthetic workflow demonstration.** Every case below is invented: no real MRI study, "
+        "patient, label, report or model prediction is involved, and the MRI model is never run."
+    )
+    st.caption("Research/demo only—not clinical advice or diagnosis.")
+    try:
+        case_set = load_public_demo_cases()
+    except PublicDemoCasesError as exc:
+        st.error(f"Could not load the public demonstration cases: {exc}")
+        return
+    st.caption(case_set.disclaimer)
+    labels = [case_label(c) for c in case_set.cases]
+    selected_label = st.selectbox("Select demonstration case", labels, key="public_demo_case_select")
+    case = case_set.cases[labels.index(selected_label)]
+    st.write(f"**Expected deterministic workflow status:** `{case.expected_workflow_status}`")
+    st.caption(case.expected_reason)
+    if st.button("Run demonstration workflow", type="primary", key="public_demo_run_button"):
+        st.session_state["public_demo_case_id"] = case.case_id
+    if st.session_state.get("public_demo_case_id") == case.case_id:
+        result, quality, references = build_case_inputs(case)
+        render_workflow(
+            result, key_prefix="public", quality_gate_status=quality, evidence_references=references,
+            show_scores=False, force_local_llm=True,
+        )
+
+
+if _public_demo_mode_enabled() and (not data_root_input or not checkpoint_input):
+    render_public_demo()
+    st.stop()
 
 st.divider()
 with st.expander(
@@ -507,7 +570,6 @@ default_study_index = (
 study_uid = st.selectbox(
     "Available MRI study (StudyInstanceUID)", available_studies, index=default_study_index, key="study_select",
 )
-
 run_clicked = st.button(
     "Run trained inference on selected MRI study", type="primary", key="run_inference_button",
 )

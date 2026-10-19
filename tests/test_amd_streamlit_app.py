@@ -52,6 +52,13 @@ def _no_ambient_llm_credentials(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _opt_out_of_public_demo_mode(monkeypatch):
+    """Existing tests below cover the metadata-only/real-inference behavior; public synthetic-demo
+    mode (tests/test_amd_public_demo.py) is opted out of here so they stay unchanged."""
+    monkeypatch.setenv("AMD_PUBLIC_DEMO_MODE", "false")
+
+
 class TestNoConfiguration:
     def test_app_loads_without_crashing(self, no_env):
         at = AppTest.from_file(APP_PATH)

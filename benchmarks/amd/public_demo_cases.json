@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "case_set": "amd_public_synthetic_demo_v1",
+  "disclaimer": "Research/demo only—not clinical advice or diagnosis. All cases are synthetic, non-patient placeholders written for this demonstration; none derives from any real study, label, report, image or model output.",
+  "cases": [
+    {
+      "case_id": "DEMO-001",
+      "title": "Low concern / routine review",
+      "synthetic": true,
+      "inference_status": "OK",
+      "quality_gate_status": "OK",
+      "scores": {"ACL": 0.05, "MCL": 0.05, "Medial Meniscus": 0.05, "Lateral Meniscus": 0.05, "Medial OA": 0.05, "Lateral OA": 0.05, "PF OA": 0.05, "Effusion": 0.05, "Synovitis": 0.05, "Baker's": 0.05, "Contusion": 0.05, "Fracture": 0.05},
+      "warnings": [],
+      "evidence_references": ["synthetic-evidence-note-001"],
+      "expected_workflow_status": "EVIDENCE_COMPLETE_FOR_RESEARCH_REVIEW",
+      "expected_reason": "Synthetic inputs are structurally consistent, quality is OK and there are no warnings, so the deterministic consensus reports complete evidence for research review."
+    },
+    {
+      "case_id": "DEMO-002",
+      "title": "Multiple evidence items / reviewer attention",
+      "synthetic": true,
+      "inference_status": "OK",
+      "quality_gate_status": "REVIEW",
+      "scores": {"ACL": 0.30, "MCL": 0.20, "Medial Meniscus": 0.40, "Lateral Meniscus": 0.10, "Medial OA": 0.20, "Lateral OA": 0.10, "PF OA": 0.30, "Effusion": 0.40, "Synovitis": 0.20, "Baker's": 0.10, "Contusion": 0.20, "Fracture": 0.10},
+      "warnings": ["Synthetic engine note A: an input slice group is flagged for reviewer attention.", "Synthetic engine note B: a second evidence item is flagged."],
+      "evidence_references": ["synthetic-evidence-note-002a", "synthetic-evidence-note-002b"],
+      "expected_workflow_status": "MORE_EVIDENCE_REQUIRED",
+      "expected_reason": "Quality is flagged REVIEW and two synthetic engine warnings are present, so the consensus asks for more evidence before the evidence is treated as complete."
+    },
+    {
+      "case_id": "DEMO-003",
+      "title": "Uncertain evidence / request more evidence",
+      "synthetic": true,
+      "inference_status": "OK",
+      "quality_gate_status": "NOT_ASSESSED",
+      "scores": {"ACL": 0.50, "MCL": 0.50, "Medial Meniscus": 0.50, "Lateral Meniscus": 0.50, "Medial OA": 0.50, "Lateral OA": 0.50, "PF OA": 0.50, "Effusion": 0.50, "Synovitis": 0.50, "Baker's": 0.50, "Contusion": 0.50, "Fracture": 0.50},
+      "warnings": [],
+      "evidence_references": [],
+      "expected_workflow_status": "MORE_EVIDENCE_REQUIRED",
+      "expected_reason": "The synthetic quality assessment was never run (NOT_ASSESSED) and no supporting evidence references exist, so the consensus requires more evidence."
+    },
+    {
+      "case_id": "DEMO-004",
+      "title": "Data-quality limitation",
+      "synthetic": true,
+      "inference_status": "UNABLE_TO_EVALUATE",
+      "quality_gate_status": "INVALID",
+      "scores": null,
+      "warnings": ["Synthetic data-quality limitation: the simulated input could not be evaluated."],
+      "evidence_references": [],
+      "expected_workflow_status": "INFERENCE_UNAVAILABLE",
+      "expected_reason": "The simulated evaluation reported UNABLE_TO_EVALUATE and produced no usable values, so the consensus reports inference unavailable."
+    },
+    {
+      "case_id": "DEMO-005",
+      "title": "Mandatory human escalation",
+      "synthetic": true,
+      "inference_status": "OK",
+      "quality_gate_status": "OK",
+      "scores": null,
+      "warnings": ["Synthetic contradiction: status says OK but no values were recorded."],
+      "evidence_references": ["synthetic-evidence-note-005"],
+      "expected_workflow_status": "INCONSISTENT_EVIDENCE",
+      "expected_reason": "The synthetic record is self-contradictory (status OK without values), so the consensus flags inconsistent evidence and a human should escalate."
+    }
+  ]
+}
