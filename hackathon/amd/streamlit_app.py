@@ -424,7 +424,13 @@ def render_public_demo() -> None:
         )
 
 
-if _public_demo_mode_enabled() and (not data_root_input or not checkpoint_input):
+# Real inference needs BOTH paths set AND passing the same cheap structural checks used below.
+# Blank or stale/invalid values (e.g. leftover /app/data/... Railway variables) therefore select
+# the public synthetic mode, while valid local paths keep genuine MRI inference.
+_real_inference_paths_usable = bool(data_root_input and checkpoint_input) and not validate_data_paths(
+    Path(data_root_input), Path(checkpoint_input)
+)
+if _public_demo_mode_enabled() and not _real_inference_paths_usable:
     render_public_demo()
     st.stop()
 

@@ -193,6 +193,30 @@ class TestPublicModeApp:
         assert "benchmark_scenario_select" in [s.key for s in at.selectbox]
         assert "public_demo_case_select" not in [s.key for s in at.selectbox]
 
+    @pytest.mark.parametrize("root, ckpt", [
+        ("/app/data/rsna-knee", "/app/models/fold0-knee-mil-best.ckpt"),  # stale Railway values
+        ("/app/data/rsna-knee", ""),
+    ])
+    def test_non_empty_but_invalid_paths_select_public_mode(self, public_env, forbid_everything, monkeypatch, root, ckpt):
+        monkeypatch.setenv("AMD_KAGGLE_RSNA_ROOT", root)
+        monkeypatch.setenv("AMD_KAGGLE_CHECKPOINT", ckpt)
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert at.selectbox(key="public_demo_case_select").label == "Select demonstration case"
+        assert "benchmark_scenario_select" not in [s.key for s in at.selectbox]
+        assert not at.error
+
+    def test_valid_root_with_missing_checkpoint_selects_public_mode(self, public_env, monkeypatch, tmp_path):
+        root = tmp_path / "rsna"
+        root.mkdir()
+        (root / "train.csv").write_text("StudyInstanceUID\n", encoding="utf-8")
+        monkeypatch.setenv("AMD_KAGGLE_RSNA_ROOT", str(root))
+        monkeypatch.setenv("AMD_KAGGLE_CHECKPOINT", str(tmp_path / "missing.ckpt"))
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert "public_demo_case_select" in [s.key for s in at.selectbox]
+
     def test_valid_real_paths_keep_local_real_inference_mode(self, public_env, monkeypatch, tmp_path):
         root = tmp_path / "rsna"
         root.mkdir()
