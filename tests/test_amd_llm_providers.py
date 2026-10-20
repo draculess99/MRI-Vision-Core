@@ -292,11 +292,13 @@ class TestGroqSuccess:
             return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]})
 
         monkeypatch.setattr(requests, "post", _fake_post)
-        GroqAdapter(api_key="fake-key").propose(wf.bundle, wf.consensus)
+        GroqAdapter(api_key="fake-key", model="openai/gpt-oss-20b").propose(wf.bundle, wf.consensus)
 
         assert captured["json"]["reasoning_effort"] == "low"
         assert captured["json"]["temperature"] == 0.0
-        assert captured["json"]["max_tokens"] == 1200
+        from hackathon.amd.llm_providers import GROQ_MAX_TOKENS
+
+        assert captured["json"]["max_tokens"] == GROQ_MAX_TOKENS
         assert captured["json"]["response_format"]["type"] == "json_schema"
         assert captured["json"]["response_format"]["json_schema"]["strict"] is True
         schema_props = captured["json"]["response_format"]["json_schema"]["schema"]["properties"]
@@ -969,3 +971,354 @@ class TestProposeWithFallback:
             proposal, _used = propose_with_fallback(GroqAdapter(api_key=None), wf.bundle, wf.consensus)
         outcome = screen_proposal(proposal, wf.bundle)
         assert outcome.status in (ProposalStatus.BLOCKED, ProposalStatus.QUARANTINED)
+
+
+# --------------------------------------------------------------- Groq length-only repair retry
+
+
+class TestGroqLengthRepairRetry:
+    """Valid JSON that fails ONLY a per-field length cap earns exactly one repair request; nothing else
+    is retried, and the repaired answer faces the same validation and screening as any other."""
+
+    LONG = "x" * 90  # over specialist_summary's 60-char cap
+
+    @staticmethod
+    def _response(fields_or_text, status=200):
+        content = fields_or_text if isinstance(fields_or_text, str) else json.dumps(fields_or_text)
+        return _FakeResponse(status_code=status, json_body={"choices": [{"message": {"content": content}}]}, text="body")
+
+    def _script(self, monkeypatch, responses):
+        calls = []
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            calls.append(json)
+            item = responses[min(len(calls) - 1, len(responses) - 1)]
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        return calls
+
+    def test_caps_are_unchanged(self):
+        from hackathon.amd.llm_providers import _FIELD_MAX_LENGTHS
+
+        assert _FIELD_MAX_LENGTHS == {
+            "specialist_summary": 60, "critic_summary": 135, "consensus_explanation": 110, "reviewer_focus": 80,
+        }
+
+    def test_prompt_demands_json_only_states_every_cap_and_targets_below_them(self, monkeypatch):
+        calls = self._script(monkeypatch, [self._response(_valid_explanation_fields())])
+        wf = _workflow()
+        GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        system = calls[0]["messages"][0]["content"]
+        assert "ONE JSON object and nothing else" in system and "no markdown" in system
+        for cap in ("specialist_summary <= 60", "critic_summary <= 135", "consensus_explanation <= 110", "reviewer_focus <= 80"):
+            assert cap in system
+        for target in ("specialist_summary about 50", "critic_summary about 120", "consensus_explanation about 100", "reviewer_focus about 70"):
+            assert target in system
+        assert "unusable" in system
+
+    def test_too_long_then_valid_repair_succeeds_with_one_extra_request(self, monkeypatch):
+        repaired = _valid_explanation_fields(specialist_summary="Short repaired specialist text.")
+        calls = self._script(monkeypatch, [
+            self._response(_valid_explanation_fields(specialist_summary=self.LONG)), self._response(repaired),
+        ])
+        wf = _workflow()
+        proposal = GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert len(calls) == 2
+        assert json.loads(proposal.raw_text) == repaired
+        repair_user = calls[1]["messages"][1]["content"]
+        assert "specialist_summary" in repair_user.split("\n")[0] and self.LONG in repair_user  # returned JSON is sent back
+        assert "Shorten ONLY" in repair_user and "same four-field JSON object only" in repair_user
+        assert screen_proposal(proposal, wf.bundle).status == ProposalStatus.QUARANTINED
+
+    def test_only_the_offending_fields_are_named_in_the_repair_request(self, monkeypatch):
+        calls = self._script(monkeypatch, [
+            self._response(_valid_explanation_fields(specialist_summary=self.LONG, reviewer_focus="y" * 99)),
+            self._response(_valid_explanation_fields()),
+        ])
+        wf = _workflow()
+        GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        first_line = calls[1]["messages"][1]["content"].split("\n")[0]
+        assert "specialist_summary, reviewer_focus" in first_line and "critic_summary" not in first_line
+
+    def test_still_too_long_after_the_repair_fails_and_never_retries_again(self, monkeypatch):
+        calls = self._script(monkeypatch, [self._response(_valid_explanation_fields(specialist_summary=self.LONG))])
+        wf = _workflow()
+        with pytest.raises(LLMProviderUnavailableError, match="exceeds max length"):
+            GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert len(calls) == 2  # original + exactly one repair, then stop
+
+    def test_double_failure_falls_back_to_local_with_all_four_fields(self, monkeypatch):
+        self._script(monkeypatch, [self._response(_valid_explanation_fields(specialist_summary=self.LONG))])
+        wf = _workflow()
+        proposal, used = propose_with_fallback(GroqAdapter(api_key="k"), wf.bundle, wf.consensus)
+        assert used.startswith("local (fallback:")
+        assert set(json.loads(proposal.raw_text)) == {
+            "specialist_summary", "critic_summary", "consensus_explanation", "reviewer_focus",
+        }
+
+    @pytest.mark.parametrize("first", [
+        "this is not json {",
+        json.dumps({"summary": "wrong keys"}),
+        json.dumps({**_valid_explanation_fields(), "extra": "field"}),
+        json.dumps({**_valid_explanation_fields(), "critic_summary": ""}),
+        json.dumps({**_valid_explanation_fields(), "critic_summary": 5}),
+        "",
+    ])
+    def test_non_length_schema_failures_are_never_retried(self, monkeypatch, first):
+        calls = self._script(monkeypatch, [self._response(first), self._response(_valid_explanation_fields())])
+        wf = _workflow()
+        with pytest.raises(LLMProviderUnavailableError):
+            GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert len(calls) == 1
+
+    @pytest.mark.parametrize("failure", [
+        requests.Timeout("t"), requests.ConnectionError("c"), _FakeResponse(status_code=401, text="no"),
+        _FakeResponse(status_code=500, text="boom"), _FakeResponse(json_body=ValueError("not json")),
+    ])
+    def test_network_and_http_failures_are_never_retried(self, monkeypatch, failure):
+        calls = self._script(monkeypatch, [failure, self._response(_valid_explanation_fields())])
+        wf = _workflow()
+        with pytest.raises(LLMProviderUnavailableError):
+            GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert len(calls) == 1
+
+    def test_a_failure_of_the_repair_request_itself_is_not_retried(self, monkeypatch):
+        calls = self._script(monkeypatch, [
+            self._response(_valid_explanation_fields(specialist_summary=self.LONG)), requests.Timeout("t"),
+        ])
+        wf = _workflow()
+        with pytest.raises(LLMProviderUnavailableError, match="timed out"):
+            GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert len(calls) == 2
+
+    def test_a_repaired_unsafe_answer_is_still_blocked_by_unchanged_screening(self, monkeypatch):
+        self._script(monkeypatch, [
+            self._response(_valid_explanation_fields(specialist_summary=self.LONG)),
+            self._response(_valid_explanation_fields(consensus_explanation="Approved by clinician on review.")),
+        ])
+        wf = _workflow()
+        proposal = GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert screen_proposal(proposal, wf.bundle).status == ProposalStatus.BLOCKED
+
+    def test_neither_request_leaks_identifiers_and_repair_never_touches_deterministic_state(self, monkeypatch):
+        calls = self._script(monkeypatch, [
+            self._response(_valid_explanation_fields(specialist_summary=self.LONG)), self._response(_valid_explanation_fields()),
+        ])
+        wf = _workflow(study_uid="1.2.3.secret", checkpoint_path="C:/secret/x.ckpt")
+        status_before, findings_before = wf.consensus.workflow_status, tuple(wf.consensus.critic_findings)
+        scores_before = dict(wf.bundle.probabilities)
+        state_before = wf.review_gate.state
+        GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        for call in calls:
+            blob = json.dumps(call)
+            assert "1.2.3.secret" not in blob and "x.ckpt" not in blob and "secret" not in blob
+        assert wf.consensus.workflow_status is status_before and tuple(wf.consensus.critic_findings) == findings_before
+        assert dict(wf.bundle.probabilities) == scores_before and wf.review_gate.state == state_before
+
+
+# ------------------------------------------------ Groq HTTP 400 json_validate_failed (reasoning budget)
+
+
+class TestGroqReasoningBudgetRegression:
+    """Live diagnosis: HTTP 400 {"code": "json_validate_failed"} with an EMPTY failed_generation meant
+    gpt-oss-20b's hidden reasoning used the whole completion budget (then 1200) before emitting any JSON.
+    The same request succeeded at 2500/4000. Keep the budget comfortably above observed reasoning use."""
+
+    @staticmethod
+    def _json_validate_failed():
+        body = {"error": {
+            "message": "Failed to validate JSON. Please adjust your prompt. See 'failed_generation' for more details.",
+            "type": "invalid_request_error", "code": "json_validate_failed", "failed_generation": "",
+        }}
+        return _FakeResponse(status_code=400, json_body=body, text=json.dumps(body))
+
+    def test_the_budget_clears_the_observed_reasoning_usage_with_margin(self):
+        from hackathon.amd.llm_providers import GROQ_MAX_TOKENS
+
+        assert GROQ_MAX_TOKENS >= 3000  # observed: up to ~1500 reasoning tokens + ~120 JSON tokens; 2500 and 4000 passed
+
+    def test_every_groq_request_including_a_repair_uses_the_budget(self, monkeypatch):
+        from hackathon.amd.llm_providers import GROQ_MAX_TOKENS
+
+        sent = []
+        long_first = json.dumps(_valid_explanation_fields(specialist_summary="x" * 90))
+        responses = [long_first, json.dumps(_valid_explanation_fields())]
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            sent.append(json["max_tokens"])
+            return _FakeResponse(json_body={"choices": [{"message": {"content": responses[len(sent) - 1]}}]})
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        wf = _workflow()
+        GroqAdapter(api_key="k", model="openai/gpt-oss-20b").propose(wf.bundle, wf.consensus)
+        assert sent == [GROQ_MAX_TOKENS, GROQ_MAX_TOKENS]
+
+    def test_persistent_empty_generation_is_reported_with_its_code_after_exactly_one_resubmit(self, monkeypatch):
+        calls = []
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            calls.append(1)
+            return self._json_validate_failed()
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        wf = _workflow()
+        with pytest.raises(LLMProviderUnavailableError, match=r"HTTP 400 \(json_validate_failed\)") as exc_info:
+            GroqAdapter(api_key="super-secret-groq-key").propose(wf.bundle, wf.consensus)
+        assert len(calls) == 2  # original + exactly one resubmit, never a third
+        assert "super-secret-groq-key" not in str(exc_info.value)
+
+    def test_json_validate_failed_falls_back_to_local(self, monkeypatch):
+        monkeypatch.setattr(requests, "post", lambda *a, **k: self._json_validate_failed())
+        wf = _workflow()
+        proposal, used = propose_with_fallback(GroqAdapter(api_key="k"), wf.bundle, wf.consensus)
+        assert used.startswith("local (fallback:") and "json_validate_failed" in used
+        assert set(json.loads(proposal.raw_text)) == {
+            "specialist_summary", "critic_summary", "consensus_explanation", "reviewer_focus",
+        }
+
+    @pytest.mark.parametrize("body", ["not json", '{"error": "plain string"}', '{"error": {"code": "has spaces; drop table"}}'])
+    def test_an_unusable_error_code_is_simply_omitted(self, monkeypatch, body):
+        response = _FakeResponse(status_code=400, json_body=ValueError("x"), text=body)
+        if body.startswith("{"):
+            response = _FakeResponse(status_code=400, json_body=json.loads(body), text=body)
+        monkeypatch.setattr(requests, "post", lambda *a, **k: response)
+        wf = _workflow()
+        with pytest.raises(LLMProviderUnavailableError, match="HTTP 400") as exc_info:
+            GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert "(" not in str(exc_info.value).split(":")[0]
+
+
+class TestGroqTransientEmptyGenerationResubmit:
+    """Live evidence: HTTP 400 json_validate_failed with an EMPTY failed_generation is an intermittent
+    provider-side failure (often the first call after idle, ~5s before failing) on requests that otherwise
+    succeed. It alone earns one resubmit; no other failure does."""
+
+    @staticmethod
+    def _error(status=400, code="json_validate_failed", failed_generation=""):
+        body = {"error": {"message": "Failed to validate JSON.", "code": code, "failed_generation": failed_generation}}
+        return _FakeResponse(status_code=status, json_body=body, text=json.dumps(body))
+
+    @staticmethod
+    def _ok(fields=None):
+        return _FakeResponse(json_body={"choices": [{"message": {"content": json.dumps(fields or _valid_explanation_fields())}}]})
+
+    def _script(self, monkeypatch, responses):
+        calls = []
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            calls.append(json)
+            return responses[min(len(calls) - 1, len(responses) - 1)]
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        return calls
+
+    def test_empty_generation_then_success_returns_the_answer(self, monkeypatch):
+        calls = self._script(monkeypatch, [self._error(), self._ok()])
+        wf = _workflow()
+        proposal = GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert len(calls) == 2 and json.loads(proposal.raw_text) == _valid_explanation_fields()
+        assert calls[0] == calls[1]  # an identical request: nothing about it is changed or widened
+
+    @pytest.mark.parametrize("failure", [
+        pytest.param(("generated-invalid-json", dict(failed_generation='{"specialist_summary": "cut off')), id="400-with-generated-text"),
+        pytest.param(("other-400-code", dict(code="invalid_request_error")), id="other-400-code"),
+        pytest.param(("bad-request", dict(code="model_not_found", status=404)), id="404"),
+        pytest.param(("auth", dict(code="invalid_api_key", status=401)), id="401"),
+        pytest.param(("rate", dict(code="rate_limit_exceeded", status=429)), id="429"),
+        pytest.param(("server", dict(code="internal_error", status=500)), id="500"),
+    ])
+    def test_every_other_failure_is_never_resubmitted(self, monkeypatch, failure):
+        _, kwargs = failure
+        calls = self._script(monkeypatch, [self._error(**kwargs), self._ok()])
+        wf = _workflow()
+        with pytest.raises(LLMProviderUnavailableError):
+            GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert len(calls) == 1
+
+    def test_the_length_repair_request_can_also_survive_one_transient_failure(self, monkeypatch):
+        too_long = self._ok(_valid_explanation_fields(specialist_summary="x" * 90))
+        repaired = _valid_explanation_fields(specialist_summary="Short repaired text.")
+        calls = self._script(monkeypatch, [too_long, self._error(), self._ok(repaired)])
+        wf = _workflow()
+        proposal = GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert len(calls) == 3 and json.loads(proposal.raw_text) == repaired
+
+    def test_resubmits_are_bounded_even_when_everything_keeps_failing(self, monkeypatch):
+        too_long = self._ok(_valid_explanation_fields(specialist_summary="x" * 90))
+        calls = self._script(monkeypatch, [too_long, self._error(), self._error()])
+        wf = _workflow()
+        with pytest.raises(LLMProviderUnavailableError):
+            GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert len(calls) == 3  # first, repair, ONE resubmit of the repair -- then stop
+
+    def test_a_recovered_answer_still_faces_unchanged_screening_and_leaks_nothing(self, monkeypatch):
+        calls = self._script(monkeypatch, [self._error(), self._ok(_valid_explanation_fields(consensus_explanation="Approved by clinician on review."))])
+        wf = _workflow(study_uid="1.2.3.secret", checkpoint_path="C:/secret/x.ckpt")
+        proposal = GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert screen_proposal(proposal, wf.bundle).status == ProposalStatus.BLOCKED
+        assert all("secret" not in json.dumps(c) for c in calls)
+
+
+class TestGroqModelAwareRequest:
+    """Live diagnosis on the real-study path: gpt-oss-20b (reasoning cannot be disabled) spent 1,800-3,300
+    hidden tokens, overran the field caps, and its 4,000-token reservations tripped the 8,000 tokens/minute
+    limit. qwen/qwen3.8-27b with reasoning_effort="none" answered 3/3 first try in ~1.5s (~100 tokens)."""
+
+    @staticmethod
+    def _capture(monkeypatch):
+        sent = []
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            sent.append(json)
+            return _FakeResponse(json_body={"choices": [{"message": {"content": _structured_content()}}]})
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        return sent
+
+    def test_the_default_groq_model_is_qwen(self, monkeypatch):
+        monkeypatch.delenv("GROQ_MODEL", raising=False)
+        from hackathon.amd.llm_providers import DEFAULT_GROQ_MODEL
+
+        assert DEFAULT_GROQ_MODEL == "qwen/qwen3.8-27b"
+        assert GroqAdapter(api_key="k").model == "qwen/qwen3.8-27b"
+
+    def test_qwen_runs_with_reasoning_off_and_a_small_reserved_budget(self, monkeypatch):
+        from hackathon.amd.llm_providers import GROQ_MAX_TOKENS, GROQ_MAX_TOKENS_NO_REASONING
+
+        sent = self._capture(monkeypatch)
+        wf = _workflow()
+        GroqAdapter(api_key="k", model="qwen/qwen3.8-27b").propose(wf.bundle, wf.consensus)
+        body = sent[0]
+        assert body["model"] == "qwen/qwen3.8-27b"
+        assert body["reasoning_effort"] == "none"
+        assert body["max_tokens"] == GROQ_MAX_TOKENS_NO_REASONING < GROQ_MAX_TOKENS
+        # a first request plus a repair request must fit well inside 8,000 tokens/minute
+        assert 2 * body["max_tokens"] <= 4000
+        assert body["response_format"]["type"] == "json_schema" and body["response_format"]["json_schema"]["strict"] is True
+        assert body["temperature"] == 0.0
+
+    def test_gpt_oss_keeps_low_reasoning_and_the_large_budget(self, monkeypatch):
+        from hackathon.amd.llm_providers import GROQ_MAX_TOKENS
+
+        sent = self._capture(monkeypatch)
+        wf = _workflow()
+        for model in ("openai/gpt-oss-20b", "openai/gpt-oss-120b"):
+            GroqAdapter(api_key="k", model=model).propose(wf.bundle, wf.consensus)
+        assert [(b["reasoning_effort"], b["max_tokens"]) for b in sent] == [("low", GROQ_MAX_TOKENS)] * 2
+
+    def test_groq_model_env_override_still_selects_the_model_and_its_tuning(self, monkeypatch):
+        sent = self._capture(monkeypatch)
+        monkeypatch.setenv("GROQ_MODEL", "openai/gpt-oss-20b")
+        wf = _workflow()
+        GroqAdapter(api_key="k").propose(wf.bundle, wf.consensus)
+        assert sent[0]["model"] == "openai/gpt-oss-20b" and sent[0]["reasoning_effort"] == "low"
+
+    def test_the_qwen_request_still_carries_only_the_redacted_payload(self, monkeypatch):
+        sent = self._capture(monkeypatch)
+        wf = _workflow(study_uid="1.2.3.secret", checkpoint_path="C:/secret/x.ckpt")
+        GroqAdapter(api_key="super-secret-groq-key", model="qwen/qwen3.8-27b").propose(wf.bundle, wf.consensus)
+        serialized = json.dumps(sent[0])
+        assert "secret" not in serialized and "x.ckpt" not in serialized

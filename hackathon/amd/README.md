@@ -150,6 +150,53 @@ Providers are interchangeable by design: the MRI inference and the deterministic
 Critic/Consensus/Human-Review-Gate logic never change when the LLM provider changes — only which
 text fills the optional explanation panel does.
 
+![Live Groq structured explanation in the AMD review workflow](../../docs/images/08_live_groq_explanation.png)
+
+*Screenshot: a live Groq response was generated (provider/model: `qwen/qwen3.8-27b`), and all four
+reviewer-facing structured sections rendered (Specialist, Critic, Consensus, Reviewer focus). The
+output is advisory only: it cannot alter the raw model scores, the deterministic workflow status,
+or human approval.*
+
+### Local Groq setup
+
+Groq is selected with `LLM_PROVIDER=groq`. It is used only when the first three settings below
+(`GROQ_MODEL` is optional) are present in `.env` (or the environment); a key alone never enables an external call. Otherwise —
+or if the Groq request fails or its response does not meet the structured-output requirements —
+the app shows the labelled local deterministic fallback.
+
+```env
+LLM_PROVIDER=groq
+LLM_ALLOW_EXTERNAL_CALLS=true
+GROQ_API_KEY=your_groq_api_key_here
+GROQ_MODEL=qwen/qwen3.8-27b
+```
+
+Keep the real key in your local `.env` only; never commit it.
+
+### Local AMD Token Factory setup
+
+AMD Token Factory is a separately configured provider; selecting it never uses Groq (and the
+reverse). Take the base URL, key and model/deployment name from your own AMD Token Factory portal
+(placeholders only — never commit real values):
+
+```env
+LLM_PROVIDER=amd_token_factory
+LLM_ALLOW_EXTERNAL_CALLS=true
+AMD_TOKENFACTORY_ENABLED=true
+AMD_TOKENFACTORY_BASE_URL=your_token_factory_base_url_here
+AMD_TOKENFACTORY_API_KEY=your_token_factory_api_key_here
+AMD_TOKENFACTORY_MODEL=your_token_factory_model_here
+```
+
+The app then offers **Generate live AMD Token Factory explanation** and labels the result with
+that provider and model; if configuration is missing or the response fails the structured-output
+checks, it shows a labelled local deterministic fallback instead. The request carries the same
+allowlisted, redacted fields as Groq, and the output remains advisory only. A live call happens
+only after this configuration and a user-triggered click in the UI; this setup has not been
+re-validated by this change.
+
+AMD Token Factory requires valid portal credentials and must be live-revalidated before it is relied on; it is not confirmed usable with any particular local credential.
+
 ## Running it locally
 
 ```bash

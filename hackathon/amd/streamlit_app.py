@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -47,7 +48,7 @@ from hackathon.amd.llm_config import build_adapter, resolve_llm_config
 from hackathon.amd.public_demo_cases import (
     PublicDemoCasesError, build_case_inputs, case_label, load_public_demo_cases,
 )
-from hackathon.amd.llm_providers import LocalDeterministicAdapter, propose_with_fallback
+from hackathon.amd.llm_providers import LocalDeterministicAdapter, propose_with_fallback, redact_for_external_llm
 from hackathon.amd.review_actions import approve, escalate, is_escalation, request_more_evidence
 from hackathon.amd.run_real_checkpoint_smoke import NON_DIAGNOSTIC_NOTICE, pick_study_and_series, sha256_of_file
 from hackathon.amd.synthetic_demo import build_synthetic_demo_result
@@ -129,6 +130,17 @@ def _run_inference(data_root: Path, checkpoint_path: Path, study_uid: str | None
     return study_uid, series_uid, plane, result, model_provenance
 
 
+def sanitize_fallback_reason(reason: str, limit: int = 140) -> str:
+    """Short, display-safe reason for a fallback: drops response bodies, redacts anything that looks
+    like a credential, collapses whitespace and truncates."""
+    text = re.sub(r"(Bearer\s+\S+|gsk_\w+|sk-[\w-]+)", "[redacted]", str(reason))
+    text = re.split(r":\s*['\"]", text, maxsplit=1)[0]  # cut a quoted response body
+    text = " ".join(text.split()).strip(" .")
+    if not text:
+        return "provider unavailable"
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
 PUBLIC_DEMO_ENV_VAR = "AMD_PUBLIC_DEMO_MODE"
 
 
@@ -147,6 +159,9 @@ def _get_or_create_gate(fingerprint: str) -> ReviewGate:
     if key not in st.session_state:
         st.session_state[key] = ReviewGate(fingerprint)
     return st.session_state[key]
+
+
+_PROVIDER_LABELS = {"groq": "Groq", "amd_token_factory": "AMD Token Factory", "local": ""}
 
 
 def render_workflow(
@@ -218,35 +233,58 @@ def render_workflow(
 
     st.divider()
     st.subheader("Human review gate (simulated — no clinician approval is implied)")
-    gate = _get_or_create_gate(workflow.bundle.fingerprint)
+    fingerprint = workflow.bundle.fingerprint
+    flash_key = k(f"review_flash::{fingerprint}")
+
+    # Review actions run as on_click callbacks: Streamlit executes them BEFORE re-running the script,
+    # so the state line, the buttons' disabled state and the audit table below are drawn from the
+    # already-updated gate in the very same rerun. Only these human buttons ever call them.
+    def _apply_review_action(label, action_fn):
+        gate_ = _get_or_create_gate(fingerprint)
+        actor_ = st.session_state.get(k("actor_input"), "demo_reviewer")
+        reason_ = st.session_state.get(k("reason_input"), "")
+        if not reason_.strip():
+            st.session_state[flash_key] = ("error", "A reason is required before recording this action.")
+            return
+        try:
+            action_fn(gate_, actor=actor_, reason=reason_)
+            st.session_state[flash_key] = ("success", f"Recorded '{label}' by {actor_}.")
+        except (InvalidTransitionError, StaleEvidenceError) as exc:
+            st.session_state[flash_key] = ("error", str(exc))
+
+    def _reset_review_state():
+        st.session_state.pop(_gate_session_key(fingerprint), None)  # next render creates a fresh PENDING_REVIEW gate
+        st.session_state.pop(flash_key, None)
+        st.session_state[k("reason_input")] = ""
+        st.session_state[k("actor_input")] = "demo_reviewer"
+
+    gate = _get_or_create_gate(fingerprint)
     st.write(f"Current state: `{gate.state.value}`")
 
-    actor = st.text_input("Your name/role (actor)", value="demo_reviewer", key=k("actor_input"))
-    reason = st.text_area("Reason for this action", value="", key=k("reason_input"))
+    st.text_input("Your name/role (actor)", value="demo_reviewer", key=k("actor_input"))
+    st.text_area("Reason for this action", value="", key=k("reason_input"))
 
     action_cols = st.columns(3)
-    action_taken = None
+    locked = gate.state == ReviewState.REVIEWED
     with action_cols[0]:
-        if st.button("Approve", disabled=gate.state == ReviewState.REVIEWED, key=k("approve_button")):
-            action_taken = ("approve", approve)
+        st.button("Approve", disabled=locked, key=k("approve_button"),
+                  on_click=_apply_review_action, args=("approve", approve))
     with action_cols[1]:
-        if st.button("Request more evidence", disabled=gate.state == ReviewState.REVIEWED, key=k("request_more_evidence_button")):
-            action_taken = ("request_more_evidence", request_more_evidence)
+        st.button("Request more evidence", disabled=locked, key=k("request_more_evidence_button"),
+                  on_click=_apply_review_action, args=("request_more_evidence", request_more_evidence))
     with action_cols[2]:
-        if st.button("Escalate", disabled=gate.state == ReviewState.REVIEWED, key=k("escalate_button")):
-            action_taken = ("escalate", escalate)
+        st.button("Escalate", disabled=locked, key=k("escalate_button"),
+                  on_click=_apply_review_action, args=("escalate", escalate))
 
-    if action_taken is not None:
-        label, action_fn = action_taken
-        if not reason.strip():
-            st.error("A reason is required before recording this action.")
-        else:
-            try:
-                action_fn(gate, actor=actor, reason=reason)
-                st.success(f"Recorded '{label}' by {actor}.")
-            except (InvalidTransitionError, StaleEvidenceError) as exc:
-                st.error(str(exc))
+    flash = st.session_state.pop(flash_key, None)
+    if flash is not None:
+        (st.error if flash[0] == "error" else st.success)(flash[1])
 
+    st.button(
+        "Reset review state (demo)", key=k("reset_review_button"), on_click=_reset_review_state,
+        help="Demo helper, user action only: restores this case to PENDING_REVIEW and clears the typed "
+             "reason and this case's audit history. Nothing generated by an LLM can trigger it.",
+    )
     st.markdown("**Audit history (append-only)**")
     if gate.history:
         rows = []
@@ -273,53 +311,64 @@ def render_workflow(
     )
 
     llm_config = resolve_llm_config()
-    if force_local_llm:
-        st.caption("Public demonstration: local deterministic text only -- no external provider, API key or network.")
-    else:
+    # The provider the UI offers is exactly the one LLM_PROVIDER selects (never silently another one).
+    intended_provider = "local" if force_local_llm else llm_config.provider
+    provider_label = _PROVIDER_LABELS.get(intended_provider, "local deterministic")
+    if intended_provider == "local":
+        st.caption(
+            "Local deterministic text only -- no external provider, API key or network. Set LLM_PROVIDER "
+            "(groq or amd_token_factory) and LLM_ALLOW_EXTERNAL_CALLS=true to use a live provider. See .env.example."
+        )
+    elif intended_provider == "groq":
         st.caption(
             f"Configured via environment/.env — provider: `{llm_config.provider}`, "
             f"external calls allowed: `{llm_config.allow_external_calls}`, "
             f"GROQ_API_KEY present: `{bool(llm_config.groq_api_key)}`. "
-            "A credential being present is never enough on its own — LLM_ALLOW_EXTERNAL_CALLS must "
-            "also be explicitly true. See .env.example."
+            "A key being present is never enough on its "
+            "own -- LLM_PROVIDER=groq and LLM_ALLOW_EXTERNAL_CALLS=true must also be set. See .env.example."
+        )
+    else:
+        st.caption(
+            f"Configured via environment/.env — provider: `{llm_config.provider}`, "
+            f"external calls allowed: `{llm_config.allow_external_calls}`, "
+            f"AMD_TOKENFACTORY_ENABLED: `{llm_config.amd_enabled}`, "
+            f"AMD_TOKENFACTORY_API_KEY present: `{bool(llm_config.amd_api_key)}`, "
+            f"base URL set: `{bool(llm_config.amd_base_url)}`, model set: `{bool(llm_config.amd_model)}`. "
+            "A key being present is never enough on its own -- LLM_PROVIDER=amd_token_factory and "
+            "LLM_ALLOW_EXTERNAL_CALLS=true must also be set. See .env.example."
         )
 
-    llm_provider_options = ["Local (default, no network)", "Groq (requires GROQ_API_KEY)", "AMD Token Factory (LLM reasoning, requires .env config)"]
-    llm_provider_choice = llm_provider_options[0] if force_local_llm else st.radio(
-        "Try LLM text provider",
-        llm_provider_options,
-        key=k("llm_provider_choice"),
-        help="This only has an effect if it matches the environment-configured provider above "
-             "AND external calls are allowed there; otherwise it always falls back to local. "
-             "This AMD option is the implemented, live-verified LLM-reasoning path -- unrelated "
-             "to the 'Execution provider' AMD checkbox in the sidebar (hardware, not implemented).",
+    button_label = (
+        "Generate local deterministic explanation" if intended_provider == "local"
+        else f"Generate live {provider_label} explanation"
     )
-    intended_provider = (
-        "groq" if llm_provider_choice.startswith("Groq")
-        else "amd_token_factory" if llm_provider_choice.startswith("AMD")
-        else "local"
-    )
-
-    if st.button("Generate LLM interpretation", key=k("llm_generate_button")):
-        if force_local_llm:
-            primary, build_reason = LocalDeterministicAdapter(), "Public demonstration: using local deterministic mode only."
-        elif intended_provider == llm_config.provider:
-            primary, build_reason = build_adapter(llm_config)
+    if st.button(button_label, key=k("llm_generate_button")):
+        if intended_provider == "local":
+            primary, build_reason = LocalDeterministicAdapter(), "Local deterministic mode (no external provider)."
         else:
-            primary, build_reason = LocalDeterministicAdapter(), (
-                f"UI selected {intended_provider!r} but the environment-configured LLM_PROVIDER is "
-                f"{llm_config.provider!r}; using local deterministic mode."
-            )
+            primary, build_reason = build_adapter(llm_config)  # dispatches on llm_config.provider only
         st.caption(build_reason)
 
         proposal, provider_used = propose_with_fallback(primary, workflow.bundle, workflow.consensus)
         outcome = screen_proposal(proposal, workflow.bundle)
         st.session_state[k(f"llm_outcome::{workflow.bundle.fingerprint}")] = (provider_used, outcome)
+        # The same allowlisted view of THIS run's deterministic review that a Groq request is built from
+        # (redact_for_external_llm); kept only so the page can show what the request was based on.
+        st.session_state[k(f"llm_meta::{workflow.bundle.fingerprint}")] = {
+            "requested": intended_provider, "build_reason": build_reason,
+            "model": getattr(primary, "model", None) if provider_used == intended_provider else None,
+            "attempted": getattr(primary, "name", "") == intended_provider and intended_provider != "local",
+            "payload": redact_for_external_llm(workflow.bundle, workflow.consensus),
+        }
 
     llm_outcome_entry = st.session_state.get(k(f"llm_outcome::{workflow.bundle.fingerprint}"))
     if llm_outcome_entry is not None:
         provider_used, outcome = llm_outcome_entry
-        st.caption(f"Produced by: {provider_used}")
+        if provider_used.startswith("local (fallback:"):
+            # never echo a raw provider error (it can quote a response body) -- sanitized reason only
+            st.caption(f"Produced by: local (fallback: {sanitize_fallback_reason(provider_used[len('local (fallback:'):].rstrip(') '))})")
+        else:
+            st.caption(f"Produced by: {provider_used}")
         if outcome.status == ProposalStatus.BLOCKED:
             st.error(f"BLOCKED — {outcome.reason}")
             st.caption(f"Rejected text (shown for audit only, not evidence): {outcome.raw_text!r}")
@@ -334,11 +383,56 @@ def render_workflow(
             # shared screen_proposal() and are never recomputed from this parse.
             st.info("LLM interpretation generated — human review required")
             st.caption("Deterministic result → LLM explanation (below) → Human review")
+            # Say plainly WHO produced this text, so a local fallback can never be mistaken for an
+            # external provider's output. provider_used is exactly what propose_with_fallback()
+            # reports: "<provider>" on success, "local (fallback: <reason>)" after a failure.
+            meta = st.session_state.get(k(f"llm_meta::{workflow.bundle.fingerprint}"), {})
+            requested_label = _PROVIDER_LABELS.get(meta.get("requested"), "")
+            if provider_used in _PROVIDER_LABELS and provider_used != "local":
+                model_name = meta.get("model")
+                used_label = _PROVIDER_LABELS[provider_used]
+                st.success(f"Live {used_label} explanation" + (f" — model: {model_name}" if model_name else ""))
+                producer_sentence = (
+                    f"The {used_label} response passed automated format and safety checks. Because this is "
+                    "AI-generated text, it is"
+                )
+            elif requested_label:
+                raw_reason = (
+                    provider_used[len("local (fallback:"):].rstrip(") ")
+                    if provider_used.startswith("local (fallback:") else meta.get("build_reason", "")
+                )
+                reason_text = sanitize_fallback_reason(raw_reason)
+                if re.search(r"structured response|not valid JSON|message\.content is missing|exceeds", raw_reason):
+                    st.warning(
+                        f"Local deterministic fallback — {requested_label} response did not meet the structured-output requirements."
+                    )
+                else:
+                    st.warning(f"Local deterministic fallback — {requested_label} did not produce this explanation.")
+                with st.expander("Fallback details (sanitized)", expanded=True):
+                    st.write(f"Reason: {reason_text}")
+                producer_sentence = "This text was generated by the local deterministic template (no AI model) and is"
+            else:
+                st.info("Local deterministic explanation (no network, no AI model).")
+                producer_sentence = "This text was generated by the local deterministic template and is"
+            sent = meta.get("payload")
+            if sent and meta.get("attempted"):
+                with st.expander(f"Deterministic review fields this {requested_label or 'provider'} request was built from (allowlist only)"):
+                    st.caption(
+                        "Taken from the current run's Specialist/Critic/Consensus result. No MRI images, "
+                        "files, study IDs, paths, model weights or secrets are included; score values are "
+                        "not shown here."
+                    )
+                    st.json({
+                        "workflow_status": sent["workflow_status"],
+                        "specialist_groups": [g["group"] for g in sent["specialist_groups"]],
+                        "critic_codes": sent["critic_codes"], "critic_severities": sent["critic_severities"],
+                        "quality_gate_status": sent["quality_gate_status"], "is_ensemble": sent["is_ensemble"],
+                        "model_count": sent["model_count"], "limitations": sent["limitations"],
+                    })
             st.write(
-                "The selected LLM provider returned a response that passed automated format and "
-                "safety checks. Because this is AI-generated text, it is presented as advisory "
-                "only and is not treated as verified evidence. The underlying MRI model scores, "
-                "deterministic workflow status, and human-review gate remain unchanged."
+                f"{producer_sentence} presented as advisory only and is not treated as verified "
+                "evidence. The underlying MRI model scores, deterministic workflow status, and "
+                "human-review gate remain unchanged."
             )
             st.caption(f"Status: {outcome.status.value} (advisory text; not verified evidence) — {outcome.reason}")
 
@@ -420,7 +514,7 @@ def render_public_demo() -> None:
         result, quality, references = build_case_inputs(case)
         render_workflow(
             result, key_prefix="public", quality_gate_status=quality, evidence_references=references,
-            show_scores=False, force_local_llm=True,
+            show_scores=False,
         )
 
 
@@ -435,21 +529,24 @@ if _public_demo_mode_enabled() and not _real_inference_paths_usable:
     st.stop()
 
 st.divider()
-with st.expander(
-    "🧪 Synthetic workflow demonstration — no real data, checkpoint, or inference required",
-    expanded=not (data_root_input and checkpoint_input),
-):
-    st.warning(
-        "This panel uses fixed, fabricated placeholder numbers to demonstrate the evidence-"
-        "review / human-review / LLM-interpretation workflow when no real RSNA dataset or "
-        "trained checkpoint is available (e.g. a fresh deployment, before real data has been "
-        "authorized and bundled). No real DICOM study is read, no real checkpoint is loaded, "
-        "and no real neural-network forward pass occurs here, ever."
-    )
-    if st.button("Run synthetic workflow demonstration", key="synthetic_demo_button"):
-        st.session_state["synthetic_demo_result"] = build_synthetic_demo_result()
-    if "synthetic_demo_result" in st.session_state:
-        render_workflow(st.session_state["synthetic_demo_result"], key_prefix="synthetic")
+# Only when real local inference is NOT available: with a real study and checkpoint this fabricated-
+# numbers panel would be misleading, so it is not shown at all.
+if not _real_inference_paths_usable:
+    with st.expander(
+        "🧪 Synthetic workflow demonstration — no real data, checkpoint, or inference required",
+        expanded=not (data_root_input and checkpoint_input),
+    ):
+        st.warning(
+            "This panel uses fixed, fabricated placeholder numbers to demonstrate the evidence-"
+            "review / human-review / LLM-interpretation workflow when no real RSNA dataset or "
+            "trained checkpoint is available (e.g. a fresh deployment, before real data has been "
+            "authorized and bundled). No real DICOM study is read, no real checkpoint is loaded, "
+            "and no real neural-network forward pass occurs here, ever."
+        )
+        if st.button("Run synthetic workflow demonstration", key="synthetic_demo_button"):
+            st.session_state["synthetic_demo_result"] = build_synthetic_demo_result()
+        if "synthetic_demo_result" in st.session_state:
+            render_workflow(st.session_state["synthetic_demo_result"], key_prefix="synthetic")
 
 st.divider()
 st.subheader("Curated MRI Benchmark Scenarios")
@@ -605,6 +702,10 @@ result = state["result"]
 
 st.divider()
 st.subheader(f"Study {state['study_uid']}  ·  series {state['series_uid']}  ·  plane {state['plane']}")
+st.info(
+    "**Local trained inference** — a real, locally available MRI study scored on this machine by the "
+    "bridged checkpoint. Raw research scores only; not a diagnosis."
+)
 render_workflow(result, key_prefix="real", extra_provenance=state["model_provenance"])
 
 st.divider()

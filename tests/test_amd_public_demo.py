@@ -149,7 +149,8 @@ class TestPublicModeApp:
         assert any("Current state: `PENDING_REVIEW`" in m.value for m in at.markdown)
         assert not at.table  # no raw scores table
         assert not at.json  # no scores / provenance JSON
-        assert "public_llm_provider_choice" not in [r.key for r in at.radio]  # local-only text
+        assert not at.radio  # no provider choice widget: LLM_PROVIDER alone selects the provider
+        assert [b.label for b in at.button if b.key == "public_llm_generate_button"] == ["Generate local deterministic explanation"]
 
     def test_human_gate_still_requires_a_reason_and_a_named_actor_action(self, public_env, forbid_everything):
         at = AppTest.from_file(APP_PATH)
@@ -163,18 +164,38 @@ class TestPublicModeApp:
         assert any("Recorded 'escalate'" in s.value for s in at.success)
         assert len(at.table) == 1  # the audit history now has an entry
 
-    def test_llm_generation_stays_local_even_if_env_requests_an_external_provider(
-        self, public_env, forbid_everything, monkeypatch,
-    ):
-        monkeypatch.setenv("LLM_PROVIDER", "groq")
-        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
-        monkeypatch.setenv("GROQ_API_KEY", "fake-key-never-used")
+    def test_llm_text_is_local_unless_a_live_provider_is_explicitly_enabled(self, public_env, forbid_everything):
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="public_demo_run_button").click().run(timeout=RUN_TIMEOUT)
         at.button(key="public_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
         assert not at.exception
-        assert any("Produced by: local" in c.value for c in at.caption)
+        assert any("Local deterministic explanation" in i.value for i in at.info)
+        assert not any("fallback" in w.value for w in at.warning)
+
+    def test_groq_can_go_live_in_public_mode_when_enabled(self, public_env, monkeypatch):
+        import json as _json
+
+        import requests
+
+        fields = {"specialist_summary": "s", "critic_summary": "c", "consensus_explanation": "e", "reviewer_focus": "r"}
+
+        class _Ok:
+            status_code = 200
+
+            def json(self):
+                return {"choices": [{"message": {"content": _json.dumps(fields)}}]}
+
+        monkeypatch.setenv("LLM_PROVIDER", "groq")
+        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
+        monkeypatch.setenv("GROQ_API_KEY", "fake-key")
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _Ok())
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="public_demo_run_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="public_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert any("Live Groq explanation" in s.value for s in at.success)
+        assert any("Current state: `PENDING_REVIEW`" in m.value for m in at.markdown)
 
     def test_malformed_case_file_shows_a_clean_error_and_no_fabricated_result(self, public_env, monkeypatch, tmp_path):
         bad = tmp_path / "bad.json"

@@ -43,8 +43,34 @@ from mri_core.agents.contracts import EvidenceBundle
 from mri_core.agents.llm_adapter import MAX_PROPOSAL_LENGTH, RawProposal
 
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"  # see .env.example: llama-3.3-70b-versatile 404'd for a real key tested here
+# Default: a model that can run with reasoning OFF. Live diagnosis on the real-study path showed
+# openai/gpt-oss-20b (reasoning cannot be disabled, only set to "low") spending 1,800-3,300 hidden tokens
+# per answer: it routinely blew the 60-character field caps, tripped Groq's 8,000-tokens-per-minute limit
+# (the reserved max_tokens counts) on the repair request, and intermittently returned an empty generation.
+# qwen/qwen3.8-27b with reasoning_effort="none" answered 3/3 on the first request in ~1.5s using ~100
+# completion tokens, every field within its cap. (llama-3.3-70b-versatile 404'd for a real key tested here.)
+DEFAULT_GROQ_MODEL = "qwen/qwen3.8-27b"
 DEFAULT_TIMEOUT_SECONDS = 10.0
+
+# openai/gpt-oss-20b is a reasoning model: hidden reasoning tokens and the final JSON share this one
+# completion budget. Live diagnosis of an HTTP 400 {"code": "json_validate_failed"} with an EMPTY
+# failed_generation showed the former 1200-token cap being exhausted by reasoning before any JSON was
+# emitted; the identical request succeeded (finish_reason "stop") at 2500 and 4000, using roughly
+# 400-1500 reasoning tokens plus ~120 tokens of JSON. This is only a ceiling -- unused budget is not spent.
+GROQ_MAX_TOKENS = 4000
+# Non-reasoning models (reasoning_effort "none") emit only the ~100-token JSON, so a small ceiling is
+# enough -- and it matters: Groq counts the reserved max_tokens against the 8,000 tokens/minute limit, so a
+# first request plus a repair request must not each reserve thousands of tokens.
+GROQ_MAX_TOKENS_NO_REASONING = 1000
+
+
+def groq_request_tuning(model: str) -> tuple:
+    """(reasoning_effort, max_tokens) for a Groq model. Qwen models accept reasoning_effort="none" and
+    then need only a small budget; every other model (the gpt-oss family, which cannot disable reasoning)
+    keeps "low" and the large budget shared with its hidden reasoning tokens."""
+    if str(model).lower().startswith("qwen/"):
+        return "none", GROQ_MAX_TOKENS_NO_REASONING
+    return "low", GROQ_MAX_TOKENS
 
 # Every key an external provider is ever allowed to see. redact_for_external_llm() builds its
 # output strictly from this set; nothing else is ever added.
@@ -76,6 +102,11 @@ _FIELD_MAX_LENGTHS = {
     "reviewer_focus": 80,
 }
 
+# Targets sit safely below the hard caps so a slightly long answer still fits.
+_FIELD_TARGET_LENGTHS = {
+    "specialist_summary": 50, "critic_summary": 120, "consensus_explanation": 100, "reviewer_focus": 70,
+}
+
 _SYSTEM_PROMPT = (
     "You are a research-workflow assistant for a non-diagnostic MRI research prototype. You "
     "will be given deterministic, de-identified workflow evidence already produced by fixed, "
@@ -100,6 +131,18 @@ _SYSTEM_PROMPT = (
     "approved or reviewed anything. Never invent facts not present in the data you were given. "
     "Include no field other than these four."
 )
+
+_LIMITS_TEXT = "; ".join(f"{f} <= {_FIELD_MAX_LENGTHS[f]}" for f in _EXPLANATION_FIELDS)
+_TARGETS_TEXT = ", ".join(f"{f} about {_FIELD_TARGET_LENGTHS[f]}" for f in _EXPLANATION_FIELDS)
+
+# Groq-only additions (the shared prompt above is unchanged): output format and length discipline.
+_GROQ_STRICT_OUTPUT_RULES = (
+    "\n\nOUTPUT FORMAT -- STRICT: reply with ONE JSON object and nothing else: no markdown, no code "
+    "fences, no commentary before or after it. HARD CHARACTER LIMITS (counted exactly, spaces included): "
+    f"{_LIMITS_TEXT}. Aim safely BELOW every limit -- {_TARGETS_TEXT} characters -- to leave margin. "
+    "If ANY field is over its limit the whole response is unusable and will be discarded."
+)
+_GROQ_SYSTEM_PROMPT = _SYSTEM_PROMPT + _GROQ_STRICT_OUTPUT_RULES
 
 # Structured-output schema for Groq's response_format: four required string fields. Using
 # json_schema (strict mode) rather than freeform text is what makes the *final* answer land in
@@ -131,6 +174,24 @@ class LLMProviderUnavailableError(LLMProviderError):
     network failure, timeout, a non-200 response, or a response that does not match the
     expected schema. Callers should catch this and fall back to another provider -- it is
     never raised for "the text said something unsafe," which is screen_proposal's job."""
+
+
+class EmptyGenerationError(LLMProviderUnavailableError):
+    """Groq HTTP 400 {"code": "json_validate_failed"} whose `failed_generation` is EMPTY: the model
+    emitted nothing at all, so there is no invalid JSON -- a transient provider-side failure observed
+    intermittently (often on the first call after idle, taking ~5s before failing) with identical,
+    otherwise-working requests. The only failure GroqAdapter._chat will resubmit, once."""
+
+
+class FieldLengthError(LLMProviderUnavailableError):
+    """The response was valid JSON with exactly the four required string fields, and ONLY a
+    per-field length cap was exceeded. The one failure a single repair retry is allowed to address;
+    it carries the parsed fields so the retry can ask for just those to be shortened."""
+
+    def __init__(self, message: str, structured: dict, offending_fields: tuple):
+        super().__init__(message)
+        self.structured = structured
+        self.offending_fields = offending_fields
 
 
 @dataclass(frozen=True)
@@ -279,20 +340,52 @@ class GroqAdapter:
         payload = redact_for_external_llm(bundle, consensus)
         _assert_no_leakage(payload, bundle)
 
+        data = self._chat([
+            {"role": "system", "content": _GROQ_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(payload)},
+        ])
+        try:
+            text = _extract_groq_structured_explanation(data)
+        except FieldLengthError as too_long:
+            # Exactly ONE repair attempt, and only because the JSON was otherwise valid. Network errors,
+            # credentials, invalid JSON, wrong keys and empty fields are never retried, and the repaired
+            # response goes through the very same validation (and, afterwards, the same screening).
+            over = ", ".join(too_long.offending_fields)
+            limits = {f: _FIELD_MAX_LENGTHS[f] for f in too_long.offending_fields}
+            repair_request = (
+                f"Your previous JSON had field(s) over the character limit: {over} (limits {limits}). Shorten ONLY "
+                "those field(s), keeping the same meaning, to safely below their limit; leave the other fields "
+                "exactly as they are. Reply with the same four-field JSON object only -- no markdown, no prose.\n"
+                + json.dumps(too_long.structured)
+            )
+            repaired = self._chat([
+                {"role": "system", "content": _GROQ_SYSTEM_PROMPT},
+                {"role": "user", "content": repair_request},
+            ])
+            text = _extract_groq_structured_explanation(repaired)
+        return RawProposal(raw_text=text, cited_evidence=())
+
+    def _chat(self, messages: list) -> Any:
+        """One Groq chat-completions call (used for the first and the single length-repair request).
+        Returns the decoded JSON body or raises LLMProviderUnavailableError.
+
+        Exactly one resubmit, and ONLY for an EmptyGenerationError (HTTP 400 json_validate_failed with an
+        empty failed_generation). Everything else -- timeouts, connection errors, 401/403/429/5xx, any other
+        400, a 400 that did generate (invalid JSON) -- is raised immediately and never retried here."""
+        try:
+            return self._chat_once(messages)
+        except EmptyGenerationError:
+            return self._chat_once(messages)
+
+    def _chat_once(self, messages: list) -> Any:
+        reasoning_effort, max_tokens = groq_request_tuning(self.model)
         body = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(payload)},
-            ],
+            "messages": messages,
             "response_format": _REVIEWER_RESULT_RESPONSE_FORMAT,
-            "reasoning_effort": "low",
+            "reasoning_effort": reasoning_effort,
             "temperature": 0.0,
-            # Raised from 800 alongside the AMD budget increase: a 4-field structured
-            # explanation is a heavier completion than the single-sentence summary this
-            # replaces, and openai/gpt-oss-20b is also a reasoning model subject to the same
-            # reasoning-trace/content budget-sharing behavior documented for AMD_MAX_TOKENS.
-            "max_tokens": 1200,
+            "max_tokens": max_tokens,
         }
         try:
             response = requests.post(
@@ -306,15 +399,27 @@ class GroqAdapter:
             raise LLMProviderUnavailableError(f"Groq request failed: {exc}") from exc
 
         if response.status_code != 200:
-            raise LLMProviderUnavailableError(f"Groq returned HTTP {response.status_code}: {response.text[:200]!r}")
+            # Include Groq's short error CODE (e.g. json_validate_failed) so a failure is diagnosable from
+            # the UI; never the message body, which may echo generated text.
+            code, empty_generation = "", False
+            try:
+                error = response.json().get("error") or {}
+                raw_code = error.get("code")
+                if isinstance(raw_code, str) and raw_code.replace("_", "").isalnum() and len(raw_code) <= 60:
+                    code = f" ({raw_code})"
+                empty_generation = (
+                    response.status_code == 400 and raw_code == "json_validate_failed"
+                    and error.get("failed_generation") == ""
+                )
+            except (ValueError, AttributeError):
+                pass
+            error_class = EmptyGenerationError if empty_generation else LLMProviderUnavailableError
+            raise error_class(f"Groq returned HTTP {response.status_code}{code}: {response.text[:200]!r}")
 
         try:
-            data: Any = response.json()
+            return response.json()
         except ValueError as exc:
             raise LLMProviderUnavailableError("Groq response was not valid JSON.") from exc
-
-        text = _extract_groq_structured_explanation(data)
-        return RawProposal(raw_text=text, cited_evidence=())
 
 
 _MAX_COMBINED_LENGTH = MAX_PROPOSAL_LENGTH  # the same 500-char cap screen_proposal() itself
@@ -374,11 +479,13 @@ def _extract_structured_explanation(data: Any, *, provider_label: str) -> str:
             raise LLMProviderUnavailableError(
                 f"{provider_label} structured response's {field_name!r} is missing, empty, or not a string."
             )
-        if len(value) > _FIELD_MAX_LENGTHS[field_name]:
-            raise LLMProviderUnavailableError(
-                f"{provider_label} structured response's {field_name!r} exceeds max length "
-                f"{_FIELD_MAX_LENGTHS[field_name]} characters."
-            )
+    too_long = tuple(f for f in _EXPLANATION_FIELDS if len(structured[f]) > _FIELD_MAX_LENGTHS[f])
+    if too_long:
+        raise FieldLengthError(
+            f"{provider_label} structured response's {too_long[0]!r} exceeds max length "
+            f"{_FIELD_MAX_LENGTHS[too_long[0]]} characters.",
+            dict(structured), too_long,
+        )
 
     canonical = {field_name: structured[field_name] for field_name in _EXPLANATION_FIELDS}
     raw_text = json.dumps(canonical, separators=(",", ":"))

@@ -50,6 +50,10 @@ def _no_ambient_llm_credentials(monkeypatch):
     this file see it by accident; each test opts in to a fake key explicitly if it needs one."""
     for key in ("GROQ_API_KEY", "GROQ_MODEL", "AMD_TOKENFACTORY_BASE_URL", "AMD_TOKENFACTORY_API_KEY"):
         monkeypatch.delenv(key, raising=False)
+    # Explicit defaults (the real .env on a developer machine may enable a live provider); a test that
+    # needs Groq enabled sets these itself and mocks requests.post.
+    monkeypatch.setenv("LLM_PROVIDER", "local")
+    monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "false")
 
 
 @pytest.fixture(autouse=True)
@@ -451,14 +455,14 @@ class TestOptionalLLMSection:
             raise AssertionError("requests.post was called; an ambient GROQ_API_KEY alone must never authorize this.")
 
         monkeypatch.setenv("GROQ_API_KEY", "sk-fake-looking-real-key-123456")
-        monkeypatch.delenv("LLM_PROVIDER", raising=False)
-        monkeypatch.delenv("LLM_ALLOW_EXTERNAL_CALLS", raising=False)
+        # Blank (not deleted): a real .env on a developer machine would otherwise fill these back in.
+        monkeypatch.setenv("LLM_PROVIDER", "")
+        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "")
         monkeypatch.setattr(requests, "post", _blocked)
 
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.radio(key="real_llm_provider_choice").set_value("Groq (requires GROQ_API_KEY)").run(timeout=RUN_TIMEOUT)
         at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
@@ -475,7 +479,6 @@ class TestOptionalLLMSection:
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.radio(key="real_llm_provider_choice").set_value("Groq (requires GROQ_API_KEY)").run(timeout=RUN_TIMEOUT)
         at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
@@ -507,7 +510,6 @@ class TestOptionalLLMSection:
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.radio(key="real_llm_provider_choice").set_value("Groq (requires GROQ_API_KEY)").run(timeout=RUN_TIMEOUT)
         at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
 
         assert not at.exception
@@ -521,14 +523,13 @@ class TestOptionalLLMSection:
         for text in structured_fields.values():
             assert any(text in m.value for m in at.markdown)
 
-    def test_amd_token_factory_falls_back_to_local_when_misconfigured(self, real_env, monkeypatch):
-        """Missing AMD_TOKENFACTORY_MODEL (one of the four required fields) must route to
-        local without any network call -- build_adapter() itself never constructs a
-        live-capable AMDTokenFactoryLLMAdapter in this case."""
+    def test_amd_token_factory_is_not_offered_and_never_called(self, real_env, monkeypatch):
+        """The AMD adapter code is retained, but it is not part of the active provider path: the UI
+        offers only Groq and Local, and an AMD environment selection never causes a network call."""
         import requests
 
         def _blocked(*args, **kwargs):
-            raise AssertionError("requests.post was called despite AMD being misconfigured.")
+            raise AssertionError("requests.post must never be called for an AMD Token Factory selection.")
 
         monkeypatch.setattr(requests, "post", _blocked)
         monkeypatch.setenv("LLM_PROVIDER", "amd_token_factory")
@@ -536,92 +537,17 @@ class TestOptionalLLMSection:
         monkeypatch.setenv("AMD_TOKENFACTORY_ENABLED", "true")
         monkeypatch.setenv("AMD_TOKENFACTORY_BASE_URL", "https://developer.amd.com.cn/radeon/api/v1")
         monkeypatch.setenv("AMD_TOKENFACTORY_API_KEY", "fake-amd-key")
-        # Explicitly blanked, not just left out of monkeypatch: the real .env on this machine
-        # already has AMD_TOKENFACTORY_MODEL set, and load_dotenv's override=False would fill
-        # it in from that file for any variable merely absent from os.environ.
-        monkeypatch.setenv("AMD_TOKENFACTORY_MODEL", "")
-
-        at = AppTest.from_file(APP_PATH)
-        at.run(timeout=RUN_TIMEOUT)
-        at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.radio(key="real_llm_provider_choice").set_value("AMD Token Factory (LLM reasoning, requires .env config)").run(timeout=RUN_TIMEOUT)
-        at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
-
-        assert not at.exception
-        assert any("Produced by: local" in c.value for c in at.caption)
-        assert any("not all set" in c.value for c in at.caption)
-
-    def test_amd_token_factory_mocked_success_requires_full_env_opt_in(self, real_env, monkeypatch):
-        import json as _json
-
-        import requests
-
-        structured_fields = {
-            "specialist_summary": "Mocked AMD specialist summary.",
-            "critic_summary": "Mocked AMD critic summary.",
-            "consensus_explanation": "Mocked AMD consensus explanation.",
-            "reviewer_focus": "Mocked AMD reviewer focus.",
-        }
-
-        class _FakeResponse:
-            status_code = 200
-
-            def json(self):
-                return {"choices": [{"message": {"content": _json.dumps(structured_fields)}}]}
-
-        monkeypatch.setenv("LLM_PROVIDER", "amd_token_factory")
-        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
-        monkeypatch.setenv("AMD_TOKENFACTORY_ENABLED", "true")
-        monkeypatch.setenv("AMD_TOKENFACTORY_BASE_URL", "https://developer.amd.com.cn/radeon/api/v1")
-        monkeypatch.setenv("AMD_TOKENFACTORY_API_KEY", "fake-amd-key")
         monkeypatch.setenv("AMD_TOKENFACTORY_MODEL", "Qwen3.8-27B")
-        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse())
 
         at = AppTest.from_file(APP_PATH)
         at.run(timeout=RUN_TIMEOUT)
         at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.radio(key="real_llm_provider_choice").set_value("AMD Token Factory (LLM reasoning, requires .env config)").run(timeout=RUN_TIMEOUT)
+        assert not at.radio  # no provider choice at all: Groq is the only live provider offered
+        assert [b.label for b in at.button if b.key == "real_llm_generate_button"] == ["Generate live Groq explanation"]
         at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
-
         assert not at.exception
-        assert any("Produced by: amd_token_factory" in c.value for c in at.caption)
-        assert any("LLM interpretation generated — human review required" in i.value for i in at.info)
-        headings = [h.value for h in at.markdown if h.value.startswith("#####")]
-        assert any("Specialist explanation" in h for h in headings)
-        assert any("Critic explanation" in h for h in headings)
-        assert any("Consensus explanation" in h for h in headings)
-        assert any("Reviewer focus" in h for h in headings)
-        for text in structured_fields.values():
-            assert any(text in m.value for m in at.markdown)
-        # Human review state is unaffected by the LLM call.
-        assert any("Current state: `PENDING_REVIEW`" in m.value for m in at.markdown)
-
-    def test_amd_token_factory_mocked_failure_falls_back_to_local_not_groq(self, real_env, monkeypatch):
-        """Even with Groq also fully configured in the environment, an AMD failure must fall
-        back to local, never silently try Groq."""
-        import requests
-
-        class _FakeErrorResponse:
-            status_code = 500
-            text = "internal error"
-
-        monkeypatch.setenv("LLM_PROVIDER", "amd_token_factory")
-        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
-        monkeypatch.setenv("AMD_TOKENFACTORY_ENABLED", "true")
-        monkeypatch.setenv("AMD_TOKENFACTORY_BASE_URL", "https://developer.amd.com.cn/radeon/api/v1")
-        monkeypatch.setenv("AMD_TOKENFACTORY_API_KEY", "fake-amd-key")
-        monkeypatch.setenv("AMD_TOKENFACTORY_MODEL", "Qwen3.8-27B")
-        monkeypatch.setenv("GROQ_API_KEY", "also-set-but-must-not-be-used")
-        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeErrorResponse())
-
-        at = AppTest.from_file(APP_PATH)
-        at.run(timeout=RUN_TIMEOUT)
-        at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
-        at.radio(key="real_llm_provider_choice").set_value("AMD Token Factory (LLM reasoning, requires .env config)").run(timeout=RUN_TIMEOUT)
-        at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
-
-        assert not at.exception
-        assert any("Produced by: local (fallback:" in c.value for c in at.caption)
+        assert any("Local deterministic fallback" in w.value for w in at.warning)
+        assert any("Groq is not enabled" in m.value for m in at.markdown)
 
     def test_llm_section_never_changes_review_gate_state(self, real_env):
         """The LLM interpretation must be structurally separate from the human-approval gate:
@@ -635,3 +561,715 @@ class TestOptionalLLMSection:
         assert not at.button(key="real_escalate_button").disabled
         assert not at.button(key="real_request_more_evidence_button").disabled
         assert any("No review actions recorded yet." in c.value for c in at.caption)
+
+
+class TestGroqIsTheOnlyLiveProvider:
+    """Groq is the default and only network LLM provider; every outcome is labelled honestly.
+    Synthetic path, all network mocked -- no real data, no real key."""
+
+    FIELDS = {
+        "specialist_summary": "Groq specialist text.", "critic_summary": "Groq critic text.",
+        "consensus_explanation": "Groq consensus text.", "reviewer_focus": "Groq reviewer focus text.",
+    }
+
+    @staticmethod
+    def _enable_groq(monkeypatch, model="openai/gpt-oss-20b"):
+        monkeypatch.setenv("LLM_PROVIDER", "groq")
+        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
+        monkeypatch.setenv("GROQ_API_KEY", "fake-groq-key-for-tests")
+        monkeypatch.setenv("GROQ_MODEL", model)
+
+    def _run(self, monkeypatch, response_cls, *, captured=None):
+        import requests
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            if captured is not None:
+                captured.append({"url": url, "json": json})
+            return response_cls()
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        return at
+
+    def _ok(self):
+        import json as _json
+
+        fields = self.FIELDS
+
+        class _Ok:
+            status_code = 200
+
+            def json(self):
+                return {"choices": [{"message": {"content": _json.dumps(fields), "reasoning": "hidden"}}]}
+
+        return _Ok
+
+    def test_there_is_no_provider_choice_widget_and_groq_wording_follows_LLM_PROVIDER_groq(self, no_env, monkeypatch):
+        self._enable_groq(monkeypatch)
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        assert not at.radio
+        assert [b.label for b in at.button if b.key == "synthetic_llm_generate_button"] == ["Generate live Groq explanation"]
+
+    def test_local_provider_uses_accurate_local_wording_and_never_mentions_groq_or_amd(self, no_env, monkeypatch):
+        import requests
+
+        monkeypatch.setattr(requests, "post", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no call")))
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        assert [b.label for b in at.button if b.key == "synthetic_llm_generate_button"] == ["Generate local deterministic explanation"]
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert any("Local deterministic explanation (no network, no AI model)." in i.value for i in at.info)
+        assert not any("Groq is not enabled" in m.value for m in at.markdown)
+        assert not any("fallback" in w.value for w in at.warning)
+
+    def test_default_selection_goes_live_with_groq_when_enabled(self, no_env, monkeypatch):
+        self._enable_groq(monkeypatch)
+        captured = []
+        at = self._run(monkeypatch, self._ok(), captured=captured)  # no radio change: the default
+        assert len(captured) == 1 and "groq" in captured[0]["url"]
+        assert any("Live Groq explanation" in s.value and "openai/gpt-oss-20b" in s.value for s in at.success)
+        assert any("Produced by: groq" in c.value for c in at.caption)
+        assert not at.warning or not any("Local deterministic fallback" in w.value for w in at.warning)
+
+    def test_valid_output_shows_all_four_sections(self, no_env, monkeypatch):
+        self._enable_groq(monkeypatch, model="test-model-x")
+        at = self._run(monkeypatch, self._ok())
+        assert any("Live Groq explanation — model: test-model-x" in s.value for s in at.success)
+        headings = [m.value for m in at.markdown if m.value.startswith("#####")]
+        for name in ("Specialist explanation", "Critic explanation", "Consensus explanation", "Reviewer focus"):
+            assert any(name in h for h in headings)
+        for text in self.FIELDS.values():
+            assert any(text in m.value for m in at.markdown)
+        assert not any("hidden" in m.value for m in at.markdown)  # reasoning field never shown
+
+    def test_the_current_deterministic_state_reaches_groq_through_the_allowlist(self, no_env, monkeypatch):
+        import json as _json
+
+        from hackathon.amd.llm_providers import _ALLOWED_KEYS
+        from hackathon.amd.synthetic_demo import SYNTHETIC_CHECKPOINT_PATH, SYNTHETIC_STUDY_UID, build_synthetic_demo_result
+        from mri_core.agents.contracts import QualityGateStatus
+        from mri_core.agents.orchestrator import process_inference_result
+
+        self._enable_groq(monkeypatch)
+        captured = []
+        self._run(monkeypatch, self._ok(), captured=captured)
+        workflow = process_inference_result(build_synthetic_demo_result(), quality_gate_status=QualityGateStatus.NOT_ASSESSED)
+        sent = _json.loads(captured[0]["json"]["messages"][1]["content"])
+        assert set(sent) <= _ALLOWED_KEYS
+        assert sent["workflow_status"] == workflow.consensus.workflow_status.value
+        assert sent["critic_codes"] == [f.code for f in workflow.critic_findings]
+        assert sent["critic_severities"] == [f.severity.value for f in workflow.critic_findings]
+        assert sent["quality_gate_status"] == workflow.bundle.quality_gate_status.value
+        assert sent["is_ensemble"] is workflow.bundle.is_ensemble and sent["model_count"] == workflow.bundle.model_count
+        assert sent["limitations"] == list(workflow.bundle.limitations)
+        assert [g["group"] for g in sent["specialist_groups"]] == [s.group_name for s in workflow.specialist_summaries]
+        raw_request = _json.dumps(captured[0]["json"])
+        for forbidden in (SYNTHETIC_STUDY_UID, SYNTHETIC_CHECKPOINT_PATH, "fake-groq-key-for-tests"):
+            assert forbidden not in raw_request
+
+    @pytest.mark.parametrize("kind", ["http_error", "invalid_json", "empty_content", "wrong_schema"])
+    def test_any_groq_failure_is_labelled_local_deterministic_fallback(self, no_env, monkeypatch, kind):
+        class _Bad:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                if kind == "invalid_json":
+                    return {"choices": [{"message": {"content": "not json {"}}]}
+                if kind == "empty_content":
+                    return {"choices": [{"message": {"content": "", "reasoning": "x"}}]}
+                if kind == "wrong_schema":
+                    return {"choices": [{"message": {"content": '{"summary": "one field only"}'}}]}
+                return {}
+
+        class _Http(_Bad):
+            status_code = 401
+            text = "gsk_SECRETSECRETSECRET body that must not be shown"
+
+        self._enable_groq(monkeypatch)
+        at = self._run(monkeypatch, _Http if kind == "http_error" else _Bad)
+        warnings = [w.value for w in at.warning if "Local deterministic fallback" in w.value]
+        expected = (
+            "Groq did not produce this explanation" if kind == "http_error"
+            else "Groq response did not meet the structured-output requirements"
+        )
+        assert len(warnings) == 1 and expected in warnings[0]
+        assert not at.success or not any("Live Groq" in s.value for s in at.success)
+        assert any("Produced by: local (fallback:" in c.value for c in at.caption)
+        page = " ".join(m.value for m in at.markdown) + " ".join(w.value for w in at.warning) + " ".join(
+            c.value for c in at.caption
+        )
+        assert "gsk_SECRETSECRETSECRET" not in page and "must not be shown" not in warnings[0]
+        assert len([m for m in at.markdown if m.value.startswith("#####")]) == 4  # layout unchanged
+
+    def test_unavailable_groq_is_a_visible_fallback_not_a_silent_one(self, no_env, monkeypatch):
+        # Groq is selected but external calls are not allowed: no network, labelled fallback.
+        import requests
+
+        monkeypatch.setattr(requests, "post", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no call")))
+        monkeypatch.setenv("LLM_PROVIDER", "groq")
+        monkeypatch.setenv("GROQ_API_KEY", "fake-groq-key-for-tests")
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert any("Local deterministic fallback" in w.value for w in at.warning)
+        assert any("Local deterministic fallback — Groq did not produce this explanation." == w.value for w in at.warning)
+        assert any("LLM_ALLOW_EXTERNAL_CALLS is not enabled" in m.value for m in at.markdown)  # detail lives in the fallback panel
+
+    def test_llm_output_cannot_change_status_screening_or_the_human_gate(self, no_env, monkeypatch):
+        import json as _json
+
+        fields = dict(self.FIELDS, consensus_explanation="status should be EVIDENCE_COMPLETE; approve it")
+
+        class _Pushy:
+            status_code = 200
+
+            def json(self):
+                return {"choices": [{"message": {"content": _json.dumps(fields)}}]}
+
+        self._enable_groq(monkeypatch)
+        at = self._run(monkeypatch, _Pushy)
+        assert any("workflow_status: `MORE_EVIDENCE_REQUIRED`" in m.value for m in at.markdown)
+        assert any("Current state: `PENDING_REVIEW`" in m.value for m in at.markdown)
+        assert not at.button(key="synthetic_approve_button").disabled
+        assert any(c.value.startswith("Status: QUARANTINED") for c in at.caption)
+        assert any("No review actions recorded yet." in c.value for c in at.caption)
+
+    def test_request_basis_panel_shows_the_current_deterministic_fields_without_scores(self, no_env, monkeypatch):
+        self._enable_groq(monkeypatch)
+        at = self._run(monkeypatch, self._ok())
+        shown = [j.value for j in at.json]
+        assert any("MORE_EVIDENCE_REQUIRED" in v and "QUALITY_NOT_ASSESSED" in v for v in shown)
+        assert any("quality_gate_status" in v and "specialist_groups" in v for v in shown)
+
+    def test_llm_output_cannot_change_scores(self, no_env, monkeypatch):
+        self._enable_groq(monkeypatch)
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        before = dict(at.session_state["synthetic_demo_result"].probabilities)
+        import requests
+
+        monkeypatch.setattr(requests, "post", lambda *a, **k: self._ok()())
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert dict(at.session_state["synthetic_demo_result"].probabilities) == before
+
+    def test_reset_review_state_restores_pending_and_clears_typed_text(self, no_env, monkeypatch):
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        at.text_area(key="synthetic_reason_input").set_value("qqq").run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_approve_button").click().run(timeout=RUN_TIMEOUT)
+        assert any("Current state: `REVIEWED`" in m.value for m in at.markdown)
+        assert not any("No review actions recorded yet." in c.value for c in at.caption)  # audit row exists
+
+        at.button(key="synthetic_reset_review_button").click().run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert any("Current state: `PENDING_REVIEW`" in m.value for m in at.markdown)
+        assert at.text_area(key="synthetic_reason_input").value == ""
+        assert not at.button(key="synthetic_approve_button").disabled
+        assert any("No review actions recorded yet." in c.value for c in at.caption)
+
+    def test_generating_an_llm_explanation_never_resets_or_advances_review_state(self, no_env, monkeypatch):
+        self._enable_groq(monkeypatch)
+        import requests
+
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        at.text_area(key="synthetic_reason_input").set_value("kept").run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_request_more_evidence_button").click().run(timeout=RUN_TIMEOUT)
+        monkeypatch.setattr(requests, "post", lambda *a, **k: self._ok()())
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert any("Current state: `MORE_EVIDENCE_REQUESTED`" in m.value for m in at.markdown)
+        assert not any("No review actions recorded yet." in c.value for c in at.caption)
+
+
+class TestSyntheticBannerOnlyForSyntheticFlow:
+    SYNTH_LABEL = "Synthetic workflow demonstration"
+
+    def test_synthetic_panel_is_shown_when_no_real_inference_is_available(self, no_env):
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert any(self.SYNTH_LABEL in e.label for e in at.expander)
+        assert "synthetic_demo_button" in [b.key for b in at.button]
+
+    def test_synthetic_panel_is_hidden_for_valid_real_paths(self, monkeypatch, tmp_path):
+        root = tmp_path / "rsna"
+        root.mkdir()
+        (root / "train.csv").write_text("StudyInstanceUID\n", encoding="utf-8")
+        ckpt = tmp_path / "w.ckpt"
+        ckpt.write_bytes(b"x")
+        monkeypatch.setenv("AMD_KAGGLE_RSNA_ROOT", str(root))
+        monkeypatch.setenv("AMD_KAGGLE_CHECKPOINT", str(ckpt))
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        assert not any(self.SYNTH_LABEL in e.label for e in at.expander)
+        assert "synthetic_demo_button" not in [b.key for b in at.button]
+        assert not any("fabricated placeholder" in w.value for w in at.warning)
+
+    @requires_real_assets
+    def test_real_local_inference_is_labelled_local_trained_inference(self, real_env):
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert any("Local trained inference" in i.value for i in at.info)
+        assert not any(self.SYNTH_LABEL in e.label for e in at.expander)
+        assert not any("fabricated placeholder" in w.value for w in at.warning)
+
+    @requires_real_assets
+    def test_groq_request_for_a_real_run_derives_from_that_real_runs_review(self, real_env, monkeypatch):
+        import json as _json
+
+        import requests
+
+        captured = []
+
+        class _Ok:
+            status_code = 200
+
+            def json(self):
+                return {"choices": [{"message": {"content": _json.dumps({
+                    "specialist_summary": "s", "critic_summary": "c", "consensus_explanation": "e", "reviewer_focus": "r",
+                })}}]}
+
+        monkeypatch.setenv("LLM_PROVIDER", "groq")
+        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
+        monkeypatch.setenv("GROQ_API_KEY", "fake-key")
+        monkeypatch.setattr(requests, "post", lambda url, headers=None, json=None, timeout=None: (captured.append(json), _Ok())[1])
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="run_inference_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="real_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        sent = _json.loads(captured[0]["messages"][1]["content"])
+        state = at.session_state["last_result"]
+        assert sent["workflow_status"] in (
+            "MORE_EVIDENCE_REQUIRED", "EVIDENCE_COMPLETE_FOR_RESEARCH_REVIEW", "INCONSISTENT_EVIDENCE", "INFERENCE_UNAVAILABLE",
+        )
+        assert "ENGINE_WARNINGS_PRESENT" in sent["critic_codes"]  # the bridged-checkpoint warning of THIS real run
+        assert state["study_uid"] not in _json.dumps(captured[0])
+        assert any("Live Groq explanation" in s.value for s in at.success)
+
+
+class TestReviewStateUpdatesImmediately:
+    """The state line, buttons and audit table must reflect an action in the SAME rerun as the click."""
+
+    @staticmethod
+    def _open(no_env_unused=None):
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        return at
+
+    @staticmethod
+    def _state(at):
+        return next(m.value for m in at.markdown if "Current state:" in m.value)
+
+    def test_approve_shows_reviewed_and_the_audit_row_immediately(self, no_env):
+        at = self._open()
+        assert "PENDING_REVIEW" in self._state(at)
+        at.text_area(key="synthetic_reason_input").set_value("Synthetic walkthrough").run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_approve_button").click().run(timeout=RUN_TIMEOUT)  # one click, one rerun
+        assert "REVIEWED" in self._state(at)
+        assert at.button(key="synthetic_approve_button").disabled
+        assert any("Recorded 'approve' by demo_reviewer." in s.value for s in at.success)
+        assert not any("No review actions recorded yet." in c.value for c in at.caption)
+        audit = [t for t in at.table if "reason" in list(t.value.columns)]
+        assert len(audit) == 1 and list(audit[0].value["to"]) == ["REVIEWED"]
+
+    def test_escalate_updates_state_and_audit_immediately(self, no_env):
+        at = self._open()
+        at.text_area(key="synthetic_reason_input").set_value("Needs a senior reviewer").run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_escalate_button").click().run(timeout=RUN_TIMEOUT)
+        assert "REVIEWED" in self._state(at)  # an escalation is recorded as a reviewed outcome with an escalate action
+        audit = [t for t in at.table if "reason" in list(t.value.columns)]
+        assert len(audit) == 1 and list(audit[0].value["action"]) == ["escalate"]
+        assert any("Recorded 'escalate'" in s.value for s in at.success)
+
+    def test_action_without_a_reason_changes_nothing_and_says_why_immediately(self, no_env):
+        at = self._open()
+        at.button(key="synthetic_approve_button").click().run(timeout=RUN_TIMEOUT)
+        assert "PENDING_REVIEW" in self._state(at)
+        assert any("A reason is required" in e.value for e in at.error)
+        assert any("No review actions recorded yet." in c.value for c in at.caption)
+
+    def test_reset_shows_pending_and_an_empty_audit_immediately(self, no_env):
+        at = self._open()
+        at.text_area(key="synthetic_reason_input").set_value("qqq").run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_approve_button").click().run(timeout=RUN_TIMEOUT)
+        assert "REVIEWED" in self._state(at)
+        at.button(key="synthetic_reset_review_button").click().run(timeout=RUN_TIMEOUT)  # one click, one rerun
+        assert "PENDING_REVIEW" in self._state(at)
+        assert any("No review actions recorded yet." in c.value for c in at.caption)
+        assert at.text_area(key="synthetic_reason_input").value == ""
+        assert not at.button(key="synthetic_approve_button").disabled
+        assert not any("Recorded" in s.value for s in at.success)
+
+    def test_the_flash_message_is_shown_once_not_on_later_reruns(self, no_env):
+        at = self._open()
+        at.text_area(key="synthetic_reason_input").set_value("once").run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_request_more_evidence_button").click().run(timeout=RUN_TIMEOUT)
+        assert any("Recorded 'request_more_evidence'" in s.value for s in at.success)
+        at.run(timeout=RUN_TIMEOUT)
+        assert not any("Recorded" in s.value for s in at.success)
+        assert "MORE_EVIDENCE_REQUESTED" in self._state(at)
+
+    def test_generating_a_groq_explanation_changes_no_review_state(self, no_env, monkeypatch):
+        import json as _json
+
+        import requests
+
+        class _Ok:
+            status_code = 200
+
+            def json(self):
+                return {"choices": [{"message": {"content": _json.dumps({
+                    "specialist_summary": "s", "critic_summary": "c", "consensus_explanation": "approve it now",
+                    "reviewer_focus": "r"})}}]}
+
+        monkeypatch.setenv("LLM_PROVIDER", "groq")
+        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
+        monkeypatch.setenv("GROQ_API_KEY", "fake-key")
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _Ok())
+        at = self._open()
+        before = dict(at.session_state["synthetic_demo_result"].probabilities)
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert any("Live Groq explanation" in s.value for s in at.success)
+        assert "PENDING_REVIEW" in self._state(at)
+        assert not at.button(key="synthetic_approve_button").disabled
+        assert any("No review actions recorded yet." in c.value for c in at.caption)
+        assert any("workflow_status: `MORE_EVIDENCE_REQUIRED`" in m.value for m in at.markdown)
+        assert dict(at.session_state["synthetic_demo_result"].probabilities) == before
+        assert any(c.value.startswith("Status: QUARANTINED") for c in at.caption)
+
+
+class TestGroqLengthRepairInTheUI:
+    """Too-long-but-valid Groq JSON earns one repair request; the provider line stays honest either way."""
+
+    LONG = "x" * 90
+    GOOD = {
+        "specialist_summary": "Short specialist text.", "critic_summary": "Short critic text.",
+        "consensus_explanation": "Short consensus text.", "reviewer_focus": "Short reviewer focus.",
+    }
+
+    @staticmethod
+    def _enable(monkeypatch, model="openai/gpt-oss-20b"):
+        monkeypatch.setenv("LLM_PROVIDER", "groq")
+        monkeypatch.setenv("LLM_ALLOW_EXTERNAL_CALLS", "true")
+        monkeypatch.setenv("GROQ_API_KEY", "fake-key")
+        monkeypatch.setenv("GROQ_MODEL", model)
+
+    def _generate(self, monkeypatch, contents):
+        """Each POST returns the next scripted content string (the last one repeats)."""
+        import json as _json
+
+        import requests
+
+        calls = []
+
+        class _Resp:
+            status_code = 200
+
+            def __init__(self, content):
+                self._content = content
+
+            def json(self):
+                return {"choices": [{"message": {"content": self._content}}]}
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            calls.append(json)
+            return _Resp(contents[min(len(calls) - 1, len(contents) - 1)])
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        before_scores = dict(at.session_state["synthetic_demo_result"].probabilities)
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert dict(at.session_state["synthetic_demo_result"].probabilities) == before_scores
+        return at, calls, _json
+
+    def test_too_long_then_valid_repair_is_shown_as_a_live_groq_explanation(self, no_env, monkeypatch):
+        import json as _json
+
+        self._enable(monkeypatch, model="repair-model")
+        too_long = _json.dumps(dict(self.GOOD, specialist_summary=self.LONG))
+        at, calls, _ = self._generate(monkeypatch, [too_long, _json.dumps(self.GOOD)])
+        assert len(calls) == 2
+        assert any("Live Groq explanation — model: repair-model" in s.value for s in at.success)
+        assert not any("Local deterministic fallback" in w.value for w in at.warning)
+        assert any("Produced by: groq" in c.value for c in at.caption)
+        for text in self.GOOD.values():
+            assert any(text in m.value for m in at.markdown)
+        assert any("workflow_status: `MORE_EVIDENCE_REQUIRED`" in m.value for m in at.markdown)
+        assert any("Current state: `PENDING_REVIEW`" in m.value for m in at.markdown)
+        assert any(c.value.startswith("Status: QUARANTINED") for c in at.caption)
+
+    def test_still_too_long_after_repair_shows_the_structured_output_fallback_line(self, no_env, monkeypatch):
+        import json as _json
+
+        self._enable(monkeypatch)
+        at, calls, _ = self._generate(monkeypatch, [_json.dumps(dict(self.GOOD, specialist_summary=self.LONG))])
+        assert len(calls) == 2  # original + one repair, never more
+        assert not at.success or not any("Live Groq" in s.value for s in at.success)
+        banner = [w.value for w in at.warning if "Local deterministic fallback" in w.value]
+        assert banner == ["Local deterministic fallback — Groq response did not meet the structured-output requirements."]
+        details = [m.value for m in at.markdown if m.value.startswith("Reason:")]
+        assert len(details) == 1 and "specialist_summary" in details[0] and "exceeds max length 60" in details[0]
+        assert any("Produced by: local (fallback:" in c.value for c in at.caption)
+        assert len([m for m in at.markdown if m.value.startswith("#####")]) == 4
+        assert any("Current state: `PENDING_REVIEW`" in m.value for m in at.markdown)
+
+    def test_invalid_json_is_not_retried_and_shows_the_fallback(self, no_env, monkeypatch):
+        self._enable(monkeypatch)
+        at, calls, _ = self._generate(monkeypatch, ["definitely not json {"])
+        assert len(calls) == 1
+        assert any("did not meet the structured-output requirements" in w.value for w in at.warning)
+
+    def test_a_network_style_failure_is_not_retried_and_does_not_claim_a_schema_problem(self, no_env, monkeypatch):
+        import requests
+
+        self._enable(monkeypatch)
+        calls = []
+
+        def boom(*a, **k):
+            calls.append(1)
+            raise requests.ConnectionError("down")
+
+        monkeypatch.setattr(requests, "post", boom)
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert not at.exception and len(calls) == 1
+        assert any(w.value == "Local deterministic fallback — Groq did not produce this explanation." for w in at.warning)
+
+    def test_groq_persistent_http_400_json_validate_failed_shows_a_sanitized_code_after_one_resubmit(self, no_env, monkeypatch):
+        import json as _json
+
+        import requests
+
+        calls = []
+        body = {"error": {"message": "Failed to validate JSON. secret-looking gsk_ABCDEF123456", "code": "json_validate_failed",
+                          "failed_generation": ""}}
+
+        class _Bad:
+            status_code = 400
+            text = _json.dumps(body)
+
+            def json(self):
+                return body
+
+        monkeypatch.setattr(requests, "post", lambda *a, **k: (calls.append(1), _Bad())[1])
+        self._enable(monkeypatch)
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert not at.exception and len(calls) == 2  # original + exactly one resubmit of an empty generation
+        assert any(w.value == "Local deterministic fallback — Groq did not produce this explanation." for w in at.warning)
+        details = [m.value for m in at.markdown if m.value.startswith("Reason:")]
+        assert details == ["Reason: Groq returned HTTP 400 (json_validate_failed)"]
+        page = " ".join(m.value for m in at.markdown) + " ".join(c.value for c in at.caption) + " ".join(w.value for w in at.warning)
+        assert "gsk_ABCDEF123456" not in page
+
+    def test_one_transient_empty_generation_is_invisible_to_the_user(self, no_env, monkeypatch):
+        import json as _json
+
+        import requests
+
+        fields = {"specialist_summary": "s", "critic_summary": "c", "consensus_explanation": "e", "reviewer_focus": "r"}
+        bad = {"error": {"message": "Failed to validate JSON.", "code": "json_validate_failed", "failed_generation": ""}}
+        calls = []
+
+        class _Resp:
+            def __init__(self, ok):
+                self.status_code = 200 if ok else 400
+                self.text = "" if ok else _json.dumps(bad)
+                self._ok = ok
+
+            def json(self):
+                return {"choices": [{"message": {"content": _json.dumps(fields)}}]} if self._ok else bad
+
+        monkeypatch.setattr(requests, "post", lambda *a, **k: (calls.append(1), _Resp(len(calls) > 1))[1])
+        self._enable(monkeypatch)
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert len(calls) == 2
+        assert any("Live Groq explanation — model:" in s.value for s in at.success)
+        assert not any("fallback" in w.value for w in at.warning)
+
+
+class TestAMDTokenFactoryProviderAwareUI:
+    """LLM_PROVIDER=amd_token_factory must show AMD Token Factory wording and call ONLY the Token Factory
+    endpoint -- never Groq. Synthetic path, all network mocked, fake credentials."""
+
+    FIELDS = {
+        "specialist_summary": "AMD specialist text.", "critic_summary": "AMD critic text.",
+        "consensus_explanation": "AMD consensus text.", "reviewer_focus": "AMD reviewer focus text.",
+    }
+    BASE = "https://amd-token-factory.example.test/v1"
+    BUTTON = "Generate live AMD Token Factory explanation"
+
+    @classmethod
+    def _enable(cls, monkeypatch, **overrides):
+        env = {
+            "LLM_PROVIDER": "amd_token_factory", "LLM_ALLOW_EXTERNAL_CALLS": "true",
+            "AMD_TOKENFACTORY_ENABLED": "true", "AMD_TOKENFACTORY_API_KEY": "fake-amd-key-for-tests",
+            "AMD_TOKENFACTORY_BASE_URL": cls.BASE, "AMD_TOKENFACTORY_MODEL": "amd-test-model",
+            "GROQ_API_KEY": "fake-groq-key-for-tests",  # present but must never be used
+        }
+        env.update(overrides)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+
+    @staticmethod
+    def _response(fields=None, status=200):
+        import json as _json
+
+        class _R:
+            text = "upstream said no (fake-amd-key-for-tests)"
+
+            def json(self):
+                return {"choices": [{"message": {"content": _json.dumps(fields), "reasoning": "hidden"}}]}
+
+        _R.status_code = status
+        return _R
+
+    def _run(self, monkeypatch, response_cls, *, captured=None):
+        import requests
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            if captured is not None:
+                captured.append({"url": url, "headers": headers, "json": json})
+            return response_cls()
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        return at
+
+    def test_button_and_status_name_amd_token_factory_never_groq(self, no_env, monkeypatch):
+        self._enable(monkeypatch)
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        assert [b.label for b in at.button if b.key == "synthetic_llm_generate_button"] == [self.BUTTON]
+        shown = " ".join(c.value for c in at.caption)
+        assert "provider: `amd_token_factory`" in shown and "AMD_TOKENFACTORY_API_KEY present: `True`" in shown
+        assert "Groq" not in shown and "GROQ" not in shown
+        assert "fake-amd-key-for-tests" not in shown
+
+    def test_success_requests_only_token_factory_and_identifies_it_with_its_model(self, no_env, monkeypatch):
+        self._enable(monkeypatch)
+        captured = []
+        at = self._run(monkeypatch, self._response(self.FIELDS), captured=captured)
+        assert len(captured) == 1 and captured[0]["url"] == self.BASE + "/chat/completions"
+        assert "groq" not in captured[0]["url"].lower()
+        assert captured[0]["headers"]["Authorization"].startswith("Bearer ")
+        assert captured[0]["json"]["model"] == "amd-test-model"
+        assert any("Live AMD Token Factory explanation — model: amd-test-model" == s.value for s in at.success)
+        assert any("Produced by: amd_token_factory" in c.value for c in at.caption)
+        assert not any("Groq" in s.value for s in at.success)
+        assert not any("fallback" in w.value for w in at.warning)
+        for text in self.FIELDS.values():
+            assert any(text in m.value for m in at.markdown)
+        assert not any("hidden" in m.value for m in at.markdown)
+
+    def test_request_carries_only_the_allowlisted_payload(self, no_env, monkeypatch):
+        import json as _json
+
+        self._enable(monkeypatch)
+        captured = []
+        self._run(monkeypatch, self._response(self.FIELDS), captured=captured)
+        sent = _json.dumps(captured[0]["json"])
+        for forbidden in ("study_uid", "checkpoint", "fake-amd-key", "fake-groq-key", ".ckpt", ".dcm", "D:\\\\", "C:\\\\"):
+            assert forbidden not in sent
+
+    def test_missing_configuration_falls_back_with_a_token_factory_specific_reason(self, no_env, monkeypatch):
+        import requests
+
+        monkeypatch.setattr(requests, "post", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no call at all")))
+        self._enable(monkeypatch, AMD_TOKENFACTORY_BASE_URL="")
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert any(w.value == "Local deterministic fallback — AMD Token Factory did not produce this explanation." for w in at.warning)
+        text = " ".join(m.value for m in at.markdown) + " ".join(c.value for c in at.caption)
+        assert "AMD_TOKENFACTORY_BASE_URL" in text
+        assert "Groq" not in text and "fake-amd-key-for-tests" not in text
+
+    def test_http_failure_is_a_labelled_sanitized_fallback_with_no_groq_call(self, no_env, monkeypatch):
+        self._enable(monkeypatch)
+        captured = []
+        at = self._run(monkeypatch, self._response(None, status=500), captured=captured)
+        assert len(captured) == 1 and "groq" not in captured[0]["url"].lower()
+        assert any(w.value == "Local deterministic fallback — AMD Token Factory did not produce this explanation." for w in at.warning)
+        everything = " ".join(m.value for m in at.markdown) + " ".join(c.value for c in at.caption)
+        assert "fake-amd-key-for-tests" not in everything
+        assert not any("Live AMD Token Factory explanation" in s.value for s in at.success)
+
+    @pytest.mark.parametrize("bad", [
+        pytest.param({"specialist_summary": "x" * 200, "critic_summary": "c", "consensus_explanation": "e", "reviewer_focus": "r"}, id="overlength"),
+        pytest.param({"specialist_summary": "only one field"}, id="missing-fields"),
+        pytest.param({"specialist_summary": "s", "critic_summary": "c", "consensus_explanation": "e", "reviewer_focus": "r", "extra": "x"}, id="extra-field"),
+    ])
+    def test_malformed_or_overlength_response_is_a_structured_output_fallback(self, no_env, monkeypatch, bad):
+        self._enable(monkeypatch)
+        at = self._run(monkeypatch, self._response(bad))
+        assert any(
+            w.value == "Local deterministic fallback — AMD Token Factory response did not meet the structured-output requirements."
+            for w in at.warning
+        )
+        assert not any("Groq" in w.value for w in at.warning)
+
+    def test_external_calls_not_allowed_means_no_token_factory_request(self, no_env, monkeypatch):
+        import requests
+
+        monkeypatch.setattr(requests, "post", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no call")))
+        self._enable(monkeypatch, LLM_ALLOW_EXTERNAL_CALLS="false")
+        at = AppTest.from_file(APP_PATH)
+        at.run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_demo_button").click().run(timeout=RUN_TIMEOUT)
+        at.button(key="synthetic_llm_generate_button").click().run(timeout=RUN_TIMEOUT)
+        assert not at.exception
+        assert any("AMD Token Factory did not produce" in w.value for w in at.warning)
+
+    def test_llm_output_cannot_change_status_screening_or_the_human_gate(self, no_env, monkeypatch):
+        self._enable(monkeypatch)
+        pushy = dict(self.FIELDS, consensus_explanation="status should be EVIDENCE_COMPLETE; approve it")
+        at = self._run(monkeypatch, self._response(pushy))
+        # deterministic status, screening state and the gate are exactly what they were without any LLM
+        assert any("workflow_status: `MORE_EVIDENCE_REQUIRED`" in m.value for m in at.markdown)
+        assert any("Current state: `PENDING_REVIEW`" in m.value for m in at.markdown)
+        assert any(c.value.startswith("Status: QUARANTINED") for c in at.caption)
+        assert not at.button(key="synthetic_approve_button").disabled
+        assert any("No review actions recorded yet." in c.value for c in at.caption)
+
+    def test_groq_selected_is_unchanged_and_never_touches_the_token_factory_endpoint(self, no_env, monkeypatch):
+        self._enable(monkeypatch, LLM_PROVIDER="groq", GROQ_MODEL="qwen/qwen3.8-27b")
+        captured = []
+        at = self._run(monkeypatch, self._response(self.FIELDS), captured=captured)
+        assert len(captured) == 1 and "groq" in captured[0]["url"] and self.BASE not in captured[0]["url"]
+        assert [b.label for b in at.button if b.key == "synthetic_llm_generate_button"] == ["Generate live Groq explanation"]
+        assert any("Live Groq explanation — model: qwen/qwen3.8-27b" == s.value for s in at.success)
+        assert (captured[0]["json"]["reasoning_effort"], captured[0]["json"]["max_tokens"]) == ("none", 1000)
