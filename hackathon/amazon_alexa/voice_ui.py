@@ -59,7 +59,9 @@ def recording_bytes(recording: object) -> Optional[bytes]:
     return data if isinstance(data, (bytes, bytearray)) and len(data) > 0 else None
 
 
-def run_transcription(ss: MutableMapping, transcribe_fn: Optional[Callable] = None) -> None:
+def run_transcription(
+    ss: MutableMapping, transcribe_fn: Optional[Callable] = None, *, local_only: bool = False
+) -> None:
     """Transcribe the cached recording once per (recording, backend).
 
     Pure session-state logic so it can be tested without a browser. Executes
@@ -72,6 +74,9 @@ def run_transcription(ss: MutableMapping, transcribe_fn: Optional[Callable] = No
         )
         return
     backend = ss.get("voice_stt_backend", stt.DEFAULT_STT_BACKEND)
+    if local_only or ss.get("voice_local_only"):
+        backend = stt.BACKEND_LOCAL
+        ss["voice_stt_backend"] = backend
     digest = hashlib.sha256(data).hexdigest()
     if ss.get("voice_last_transcribed") == (digest, backend):
         ss["voice_stt_error"] = (
@@ -102,10 +107,14 @@ def _on_transcribe() -> None:
     run_transcription(st.session_state)
 
 
-def render_voice_assistant(case_id: str, reviewer_name: str, comment: str) -> None:
+def render_voice_assistant(
+    case_id: str, reviewer_name: str, comment: str, *, local_evidence=None
+) -> None:
     usage, session = _state()
     ss = st.session_state
     ss.setdefault("voice_command_text", "")
+    local_image_mode = local_evidence is not None
+    ss["voice_local_only"] = local_image_mode
 
     st.markdown("---")
     st.markdown("## 🎙️ Voice Assistant (Alexa-style simulation)")
@@ -117,7 +126,7 @@ def render_voice_assistant(case_id: str, reviewer_name: str, comment: str) -> No
     last = ss.get("last_voice_result")
     c1, c2, c3 = st.columns(3)
     c1.metric("Current case", case_id)
-    c2.metric("Review status", last_status(case_id))
+    c2.metric("Review status", last_status(case_id, local_evidence))
     c3.metric("Approval", session.requests[case_id].approval_state.value
               if case_id in session.requests else "PENDING_HUMAN_APPROVAL")
 
@@ -126,14 +135,16 @@ def render_voice_assistant(case_id: str, reviewer_name: str, comment: str) -> No
     b1, b2 = st.columns(2)
     with b1:
         stt_backend = st.selectbox(
-            "Speech-to-text backend", stt.STT_BACKENDS,
+            "Speech-to-text backend", [stt.BACKEND_LOCAL] if local_image_mode else stt.STT_BACKENDS,
             format_func=STT_LABELS.get, key="voice_stt_backend",
         )
         st.caption(
             f"Local Whisper installed: {'yes' if whisper_ok else 'no'} · "
             f"{stt.ENV_ASSEMBLYAI_KEY}: {'configured' if key_set else 'not set'}"
         )
-        if stt_backend == stt.BACKEND_ASSEMBLYAI:
+        if local_image_mode:
+            st.caption("Local-image mode blocks AssemblyAI; audio stays local.")
+        elif stt_backend == stt.BACKEND_ASSEMBLYAI:
             st.warning("☁️ Cloud mode: audio is sent to AssemblyAI only when you press Transcribe.")
             st.checkbox(
                 "I confirm sending this recording to AssemblyAI (uses paid credits)",
@@ -141,7 +152,7 @@ def render_voice_assistant(case_id: str, reviewer_name: str, comment: str) -> No
             )
     with b2:
         tts_backend = st.selectbox(
-            "Text-to-speech backend", tts.TTS_BACKENDS,
+            "Text-to-speech backend", [tts.BACKEND_BROWSER] if local_image_mode else tts.TTS_BACKENDS,
             format_func=TTS_LABELS.get, key="voice_tts_backend",
         )
         polly_on = False
@@ -150,7 +161,10 @@ def render_voice_assistant(case_id: str, reviewer_name: str, comment: str) -> No
                 "I understand Amazon Polly is billed by AWS and want to enable it",
                 key="voice_polly_enabled",
             )
-        st.caption("Using browser speech unless Polly is selected and enabled.")
+        st.caption(
+            "Browser speech only in local-image mode."
+            if local_image_mode else "Using browser speech unless Polly is selected and enabled."
+        )
 
     # Use the widget's return value (never raw session_state, which can hold a
     # DeletedFile placeholder) and cache the bytes for the Transcribe callback.
@@ -180,7 +194,8 @@ def render_voice_assistant(case_id: str, reviewer_name: str, comment: str) -> No
     if st.button("Execute command", type="primary", key="voice_execute_btn"):
         source = "voice" if res is not None and res.text == ss["voice_command_text"] else "typed"
         ss["last_voice_result"] = route_command(
-            ss["voice_command_text"], case_id, session, reviewer_name, comment, source=source
+            ss["voice_command_text"], case_id, session, reviewer_name, comment,
+            source=source, evidence=local_evidence,
         )
         last = ss["last_voice_result"]
         ss.pop("voice_speech", None)
@@ -192,7 +207,8 @@ def render_voice_assistant(case_id: str, reviewer_name: str, comment: str) -> No
         if st.button("🔊 Speak response", key="voice_speak_btn"):
             try:
                 ss["voice_speech"] = tts.speak(
-                    last.spoken, tts_backend, usage, polly_enabled=polly_on
+                    last.spoken, tts.BACKEND_BROWSER if local_image_mode else tts_backend,
+                    usage, polly_enabled=False if local_image_mode else polly_on
                 )
             except Exception as exc:  # noqa: BLE001 - never crash the page
                 ss["voice_speech"] = None
@@ -220,10 +236,10 @@ def render_voice_assistant(case_id: str, reviewer_name: str, comment: str) -> No
             st.caption("No voice activity yet.")
 
 
-def last_status(case_id: str) -> str:
+def last_status(case_id: str, local_evidence=None) -> str:
     from hackathon.amazon_alexa.tools import analyze_mri_evidence
 
-    return analyze_mri_evidence(case_id).status.value
+    return (local_evidence or analyze_mri_evidence(case_id)).status.value
 
 
 def stt_label(backend: str) -> str:

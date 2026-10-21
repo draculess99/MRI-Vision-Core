@@ -18,6 +18,43 @@ python -m streamlit run .\hackathon\amazon_alexa\streamlit_app.py
 
 Open the localhost URL that Streamlit prints in the terminal.
 
+**Configuration:** At startup, the app loads a `.env` file from the repository root (if present) to set private local configuration. Copy `.env.example` to `.env` and customize as needed. The `.env` file is ignored by Git and should never contain real credentials or API keys.
+
+### Local image-derived evidence (private local use only)
+
+The public app remains synthetic-only by default. To enable the optional local
+image path on a private machine, set `LOCAL_IMAGE_EVIDENCE_ENABLED=true` before
+starting Streamlit. The page then offers a synthetic demonstration case or an
+authorized baseline/current PNG, JPG, or JPEG pair. The pair is processed only
+in memory through the local `mri_core` pipeline; it is not uploaded, logged,
+persisted, or sent to any cloud provider. Local-image mode uses generic
+`local-image-pair` audit identifiers, deterministic explanations, Local Whisper,
+and browser speech only. Bedrock, Groq, AssemblyAI, and Polly are disabled.
+
+This feature is non-diagnostic and still requires a named human reviewer. Never
+enable `LOCAL_IMAGE_EVIDENCE_ENABLED` on the public Railway deployment or any
+publicly accessible service. Use it only in an authorized private local session,
+then use **Clear local image session** to remove the derived evidence and cached
+explanation from the browser session.
+
+#### Walkthrough image pair (synthetic only)
+
+For the local-image walkthrough, use the two bundled synthetic files below—not
+patient data, DICOM files, or images from a dataset:
+
+```text
+hackathon/amazon_alexa/public_demo_assets/synthetic_image_pair/
+├── baseline_synthetic.png
+└── changed_synthetic.png
+```
+
+In the uploader, select `baseline_synthetic.png` as the **baseline** image and
+`changed_synthetic.png` as the **current** image. The second image contains an
+intentional artificial calibration patch so the walkthrough can demonstrate a
+technical image-change workflow. These files are synthetic workflow-validation
+assets only; they do not represent a patient study, pathology, or clinical
+performance.
+
 ### One complete local demo run
 
 Everything below uses the free local defaults; no cloud provider is involved.
@@ -46,25 +83,24 @@ This project **imitates the Alexa interaction pattern** in a Streamlit web page.
 
 ## Architecture
 
+```mermaid
+graph TD
+    A["Streamlit UI<br/>(typed or push-to-talk)"]
+    A --> B["STT: Local Whisper<br/>(default)"]
+    B --> C{"Evidence Source?"}
+    C -->|Synthetic<br/>default| D["Synthetic<br/>Case"]
+    C -->|Local images<br/>if enabled| E["Local Image<br/>Adapter"]
+    D --> F["Deterministic<br/>Evidence &<br/>Review Support"]
+    E --> F
+    F --> G["Voice Router<br/>Non-diagnostic<br/>Response"]
+    G --> H["TTS: Browser speech<br/>(default)"]
+    H --> I{"Request Human<br/>Review?"}
+    I -->|No| J["Command Complete"]
+    I -->|Yes<br/>named reviewer| K["PENDING_<br/>HUMAN_APPROVAL"]
+    K --> L["✗ Copilot<br/>Cannot Approve"]
 ```
- Microphone (st.audio_input, push-to-talk)
-        |   press "Transcribe recording"  (deliberate, one-shot)
-        v
- stt.py ── Local faster-whisper  (default, offline, free)
-        └─ AssemblyAI            (opt-in + single-use confirmation; falls back to local on failure)
-        |
-        v   editable command box (typed fallback)
- voice_router.py ──> tools.py: analyze_mri_evidence / explain_review_status /
-        |                       request_human_approval            (deterministic, unchanged)
-        |   "approve ..." phrases are refused; review requests stay PENDING_HUMAN_APPROVAL
-        |   every command, refusal and review request is written to the audit trail
-        v
- tts.py ── Browser speech synthesis (default, local, free)
-        └─ Amazon Polly neural     (opt-in + billing acknowledgement; falls back to browser)
-        |
-        v
- Laptop speakers
-```
+
+Local-image mode is in-memory, non-diagnostic, and disables Bedrock, Groq, AssemblyAI, and Polly.
 
 ```
 hackathon/amazon_alexa/

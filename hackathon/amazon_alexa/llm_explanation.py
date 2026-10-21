@@ -328,6 +328,7 @@ Summary (max 150 chars):"""
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "MRI-Evidence-Copilot/1.0",
             },
             method="POST",
         )

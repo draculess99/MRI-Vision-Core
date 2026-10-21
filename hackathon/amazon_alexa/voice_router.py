@@ -21,6 +21,7 @@ from hackathon.amazon_alexa.tools import (
     NON_DIAGNOSTIC_NOTICE,
     ApprovalRequest,
     ApprovalState,
+    MRIEvidence,
     analyze_mri_evidence,
     explain_review_status,
     request_human_approval,
@@ -132,16 +133,20 @@ def _approval_sentence(session: VoiceSession, case_id: str) -> str:
     )
 
 
-def build_evidence_report(case_id: str, session: VoiceSession) -> str:
-    ev = analyze_mri_evidence(case_id)
+def build_evidence_report(
+    case_id: str, session: VoiceSession, evidence: Optional[MRIEvidence] = None
+) -> str:
+    """Build a report from supplied local evidence or a synthetic case."""
+    ev = evidence if evidence is not None else analyze_mri_evidence(case_id)
     ex = explain_review_status(ev)
+    evidence_source = "local image-derived" if evidence is not None else "synthetic"
     lines = [
         f"# Evidence Report — {ev.case_id}",
         "",
         f"**Review status:** {ev.status.value}",
         f"**Summary:** {ex.summary}",
         "",
-        "## Measured evidence (synthetic)",
+        f"## Measured evidence ({evidence_source})",
         f"- Baseline date: {ev.baseline_date}",
         f"- Current date: {ev.current_date}",
         f"- Quality score: {ev.quality_score:.2f}",
@@ -169,23 +174,30 @@ def route_command(
     reviewer_name: str = "",
     comment: str = "",
     source: str = "typed",
+    evidence: Optional[MRIEvidence] = None,
 ) -> CommandResult:
     """Execute a supported command against the existing MRI tools.
 
     `reviewer_name` must come from an explicit UI field, never from speech.
     """
     intent = classify(text)
-    session.log("command", case_id, intent=intent.value, source=source, text=text.strip()[:200])
+    effective_case_id = evidence.case_id if evidence is not None else case_id
+    command_details = {"intent": intent.value, "source": source}
+    # Local-image audit records intentionally exclude free text: it could contain
+    # a filename, measurements, or other user-supplied image detail.
+    if evidence is None:
+        command_details["text"] = text.strip()[:200]
+    session.log("command", effective_case_id, **command_details)
 
     def done(intent_: Intent, spoken: str, display: Optional[str] = None, ok: bool = True) -> CommandResult:
-        return CommandResult(intent_, spoken, display or spoken, case_id, ok=ok)
+        return CommandResult(intent_, spoken, display or spoken, effective_case_id, ok=ok)
 
     if intent == Intent.UNKNOWN:
         msg = f"Sorry, I did not understand that. Supported commands: {_SUPPORTED}."
         return done(intent, "Sorry, I did not understand that command.", msg, ok=False)
 
     if intent == Intent.APPROVAL_REFUSED:
-        session.log("approval_refused", case_id)
+        session.log("approval_refused", effective_case_id)
         msg = (
             "I can't approve cases. Approval requires a named human reviewer and cannot be "
             "granted by voice or by this assistant. The case remains "
@@ -194,7 +206,7 @@ def route_command(
         return done(intent, msg, ok=False)
 
     try:
-        ev = analyze_mri_evidence(case_id)
+        ev = evidence if evidence is not None else analyze_mri_evidence(case_id)
     except ValueError as exc:
         return done(intent, str(exc), ok=False)
 
@@ -224,17 +236,17 @@ def route_command(
         return done(intent, spoken)
 
     if intent == Intent.REPORT:
-        report = build_evidence_report(case_id, session)
+        report = build_evidence_report(effective_case_id, session, ev)
         ex = explain_review_status(ev)
         spoken = (
             f"Evidence report generated for {ev.case_id}. Status {ev.status.value.replace('_', ' ').lower()}. "
             f"{ex.summary} The full report is on screen. This is not a diagnosis."
         )
-        session.log("report_generated", case_id)
+        session.log("report_generated", effective_case_id)
         return done(intent, spoken, report)
 
     if intent == Intent.APPROVAL_STATUS:
-        return done(intent, _approval_sentence(session, case_id))
+        return done(intent, _approval_sentence(session, effective_case_id))
 
     # Intent.REQUEST_REVIEW
     name = (reviewer_name or "").strip()
@@ -244,11 +256,11 @@ def route_command(
             "Reviewer Name field, then request human review again."
         )
         return done(intent, msg, ok=False)
-    req = request_human_approval(case_id, name, comment)
-    session.requests[case_id] = req
-    session.log("review_requested", case_id, reviewer=req.reviewer_name)
+    req = request_human_approval(effective_case_id, name, comment)
+    session.requests[effective_case_id] = req
+    session.log("review_requested", effective_case_id, reviewer=req.reviewer_name)
     spoken = (
         f"Human review requested for reviewer {req.reviewer_name}. The approval state is "
         f"{req.approval_state.value}. The assistant cannot approve; only the named reviewer can."
     )
-    return CommandResult(intent, spoken, spoken, case_id, approval_state=req.approval_state)
+    return CommandResult(intent, spoken, spoken, effective_case_id, approval_state=req.approval_state)

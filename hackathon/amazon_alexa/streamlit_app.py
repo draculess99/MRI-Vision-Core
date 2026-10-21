@@ -6,10 +6,23 @@ No credentials required.
 Run: streamlit run hackathon/amazon_alexa/streamlit_app.py
 """
 
+import os
 import sys
 from pathlib import Path
+from copy import copy
 
+# Load .env file from repo root (safe: no credentials, config only)
 _repo_root = Path(__file__).parent.parent.parent
+_env_file = _repo_root / ".env"
+if _env_file.exists():
+    for line in _env_file.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            if "=" in line:
+                key, value = line.split("=", 1)
+                if key not in os.environ:
+                    os.environ[key] = value
+
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
@@ -20,6 +33,11 @@ from hackathon.amazon_alexa.llm_explanation import (
     MODE_DETERMINISTIC,
     _get_explanation_mode,
     generate_enhanced_explanation,
+)
+from hackathon.amazon_alexa.local_image_evidence import (
+    LocalImageEvidenceAdapter,
+    clear_local_image_evidence_state,
+    is_local_image_evidence_enabled,
 )
 from hackathon.amazon_alexa.review_agents import generate_review_support
 from hackathon.amazon_alexa.tools import (
@@ -105,19 +123,62 @@ st.markdown(
     """
 )
 
-# Case selector
+# Evidence source / case selector. The public default remains synthetic-only.
 case_labels = {
     "case-001-consistent": "1. Consistent baseline/current (no change)",
     "case-002-change": "2. Large-change review (needs review)",
     "case-003-uncertain": "3. Low-information uncertainty (low quality)",
 }
 
-st.markdown("### Select a Demonstration Case")
-selected_case = st.selectbox(
-    "Choose a case to analyze",
-    list(SYNTHETIC_CASES.keys()),
-    format_func=lambda k: case_labels.get(k, k),
-)
+local_image_enabled = is_local_image_evidence_enabled()
+local_image_mode = False
+if local_image_enabled:
+    evidence_source = st.radio(
+        "Evidence source",
+        ["Synthetic demonstration case", "Local image-derived evidence"],
+        key="evidence_source",
+    )
+    local_image_mode = evidence_source == "Local image-derived evidence"
+
+if local_image_mode:
+    st.markdown("### Local image-derived evidence")
+    st.warning(
+        "Local-only, non-diagnostic mode. Images are processed in memory for this "
+        "browser session only; they are never uploaded, persisted, or sent to cloud services."
+    )
+    authorized = st.checkbox(
+        "I am authorized to use this baseline/current image pair in this local session.",
+        key="local_image_authorized",
+    )
+    baseline_upload = st.file_uploader(
+        "Baseline image", type=["png", "jpg", "jpeg"], key="local_baseline_image"
+    )
+    current_upload = st.file_uploader(
+        "Current image", type=["png", "jpg", "jpeg"], key="local_current_image"
+    )
+    if st.button("Clear local image session", key="clear_local_image_session"):
+        clear_local_image_evidence_state(st.session_state)
+        st.rerun()
+    if not authorized or baseline_upload is None or current_upload is None:
+        st.info("Authorize and select both local PNG, JPG, or JPEG images to generate evidence.")
+        st.stop()
+    try:
+        evidence = LocalImageEvidenceAdapter.generate_evidence_from_bytes(
+            baseline_upload.getvalue(), current_upload.getvalue()
+        )
+        st.session_state["local_image_evidence"] = evidence
+    except ValueError:
+        st.session_state.pop("local_image_evidence", None)
+        st.error("The selected files could not be processed as supported local images.")
+        st.stop()
+    selected_case = evidence.case_id
+else:
+    st.markdown("### Select a Demonstration Case")
+    selected_case = st.selectbox(
+        "Choose a case to analyze",
+        list(SYNTHETIC_CASES.keys()),
+        format_func=lambda k: case_labels.get(k, k),
+    )
 
 # Step 1: Analyze
 st.markdown("---")
@@ -126,7 +187,10 @@ st.markdown(
     "Call `analyze_mri_evidence(case_id)` to load a demonstration case."
 )
 
-evidence = analyze_mri_evidence(selected_case)
+evidence = (
+    st.session_state["local_image_evidence"]
+    if local_image_mode else analyze_mri_evidence(selected_case)
+)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -196,6 +260,9 @@ st.info(
 st.markdown("---")
 st.markdown("#### Optional: Enhanced Explanation")
 
+if local_image_mode:
+    st.info("Local-image mode uses deterministic explanations only; Bedrock and Groq are disabled.")
+
 # Get default mode from environment
 env_mode = _get_explanation_mode()
 default_index = 1 if env_mode == MODE_AUTO else 0
@@ -218,11 +285,12 @@ else:
 
 if st.button("Generate enhanced explanation", key="generate_llm_explanation"):
     with st.spinner("Generating explanation..."):
-        # Pass environment and mode to generator
-        import os
         mode_to_use = MODE_AUTO if use_auto_mode else MODE_DETERMINISTIC
-        os.environ["EXPLANATION_MODE"] = mode_to_use
-        explanation = generate_enhanced_explanation(packet)
+        if local_image_mode:
+            mode_to_use = MODE_DETERMINISTIC
+        env_with_mode = copy(os.environ)
+        env_with_mode["EXPLANATION_MODE"] = mode_to_use
+        explanation = generate_enhanced_explanation(packet, env_with_mode)
         # Bind explanation to current case ID to prevent stale display
         st.session_state["llm_explanation"] = explanation
         st.session_state["llm_explanation_case_id"] = evidence.case_id
@@ -275,7 +343,10 @@ if st.button("Request Approval", type="primary"):
 # Voice assistant (push-to-talk, local by default)
 from hackathon.amazon_alexa.voice_ui import render_voice_assistant
 
-render_voice_assistant(evidence.case_id, reviewer, comment)
+render_voice_assistant(
+    evidence.case_id, reviewer, comment,
+    local_evidence=evidence if local_image_mode else None,
+)
 
 # Safety note
 st.markdown("---")
