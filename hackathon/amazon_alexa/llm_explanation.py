@@ -259,21 +259,17 @@ Key findings: {', '.join(packet.critic_findings[:2])}
 
 Summary (max 150 chars):"""
 
-        response = client.invoke_model(
+        response = client.converse(
             modelId=model_id,
-            body=json.dumps({
-                "anthropic_version": "bedrock-2023-06-01",
-                "max_tokens": 200,
-                "messages": [{"role": "user", "content": prompt}],
-            }),
-            contentType="application/json",
-            accept="application/json",
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            inferenceConfig={"maxTokens": 200},
         )
 
-        result = json.loads(response["body"].read().decode())
-        if result.get("content") and len(result["content"]) > 0:
-            text = result["content"][0].get("text", "").strip()
-            return text if text else None
+        if response.get("output") and response["output"].get("message"):
+            content = response["output"]["message"].get("content", [])
+            if content and len(content) > 0:
+                text = content[0].get("text", "").strip()
+                return text if text else None
 
     except Exception:
         # Silently fail; will fallback to Groq
