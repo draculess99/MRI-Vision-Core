@@ -1,5 +1,6 @@
 """Focused test for Bedrock Converse API adapter."""
 
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -89,3 +90,100 @@ def test_bedrock_uses_converse_api_with_configured_model():
         # Verify returned text is extracted correctly
         assert result == "Quality 0.85 (45% FG). Status: CONSISTENT.", \
             f"Should return extracted text, got {result}"
+
+
+def test_bedrock_logs_safe_error_code_on_aws_exception():
+    """Verify Bedrock logs only safe error code when AWS exception occurs."""
+    # Create synthetic evidence
+    evidence = MRIEvidence(
+        case_id="case-001-consistent",
+        baseline_date="2024-10-21",
+        current_date="2024-10-21",
+        quality_score=0.85,
+        foreground_percentage=45.0,
+        mean_intensity=128.0,
+        status=ReviewStatus.CONSISTENT,
+        change_description="Measured values are consistent.",
+    )
+
+    explanation = explain_review_status(evidence)
+    packet = generate_review_support(evidence, explanation)
+
+    # Mock boto3.client to raise AWS-style exception
+    with patch("boto3.client") as mock_client_constructor:
+        mock_client = MagicMock()
+        mock_client_constructor.return_value = mock_client
+
+        # Create AWS-style exception with Error Code
+        aws_exception = Exception("Some AWS error")
+        aws_exception.response = {"Error": {"Code": "AccessDenied"}}
+        mock_client.converse.side_effect = aws_exception
+
+        # Mock environment
+        env = {
+            "BEDROCK_ENABLED": "true",
+            "AWS_REGION": "us-east-1",
+            "BEDROCK_MODEL_ID": "us.amazon.nova-lite-v1:0",
+            "LLM_TIMEOUT_SECONDS": "10",
+        }
+
+        # Capture log output
+        with patch("hackathon.amazon_alexa.llm_explanation.logger") as mock_logger:
+            result = _call_bedrock(packet, env)
+
+            # Verify returns None (fallback behavior preserved)
+            assert result is None, "Should return None on failure"
+
+            # Verify debug log was called with safe error code only
+            mock_logger.debug.assert_called_once()
+            log_call = mock_logger.debug.call_args[0][0]
+            assert "AccessDenied" in log_call, "Should log AWS error code"
+            assert "Some AWS error" not in log_call, "Should not log exception message"
+
+
+def test_bedrock_logs_exception_class_on_non_aws_exception():
+    """Verify Bedrock logs only exception class name on non-AWS exception."""
+    # Create synthetic evidence
+    evidence = MRIEvidence(
+        case_id="case-001-consistent",
+        baseline_date="2024-10-21",
+        current_date="2024-10-21",
+        quality_score=0.85,
+        foreground_percentage=45.0,
+        mean_intensity=128.0,
+        status=ReviewStatus.CONSISTENT,
+        change_description="Measured values are consistent.",
+    )
+
+    explanation = explain_review_status(evidence)
+    packet = generate_review_support(evidence, explanation)
+
+    # Mock boto3.client to raise generic exception
+    with patch("boto3.client") as mock_client_constructor:
+        mock_client = MagicMock()
+        mock_client_constructor.return_value = mock_client
+
+        # Create generic exception with no AWS response
+        generic_exception = TimeoutError("Request timed out")
+        mock_client.converse.side_effect = generic_exception
+
+        # Mock environment
+        env = {
+            "BEDROCK_ENABLED": "true",
+            "AWS_REGION": "us-east-1",
+            "BEDROCK_MODEL_ID": "us.amazon.nova-lite-v1:0",
+            "LLM_TIMEOUT_SECONDS": "10",
+        }
+
+        # Capture log output
+        with patch("hackathon.amazon_alexa.llm_explanation.logger") as mock_logger:
+            result = _call_bedrock(packet, env)
+
+            # Verify returns None (fallback behavior preserved)
+            assert result is None, "Should return None on failure"
+
+            # Verify debug log was called with exception class name only
+            mock_logger.debug.assert_called_once()
+            log_call = mock_logger.debug.call_args[0][0]
+            assert "TimeoutError" in log_call, "Should log exception class name"
+            assert "Request timed out" not in log_call, "Should not log exception message"

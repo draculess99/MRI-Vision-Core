@@ -11,6 +11,7 @@ identity. All output is validated and length-limited.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import urllib.request
@@ -18,6 +19,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from hackathon.amazon_alexa.review_agents import ReviewSupportPacket
+
+logger = logging.getLogger(__name__)
 
 
 # Environment variable names
@@ -271,9 +274,16 @@ Summary (max 150 chars):"""
                 text = content[0].get("text", "").strip()
                 return text if text else None
 
-    except Exception:
-        # Silently fail; will fallback to Groq
-        pass
+    except Exception as e:
+        # Log safe failure category only (no message, body, credentials, or payloads)
+        error_code = None
+        if hasattr(e, "response") and isinstance(e.response, dict):
+            error_code = e.response.get("Error", {}).get("Code")
+        if error_code:
+            logger.debug(f"Bedrock failed with error code: {error_code}")
+        else:
+            logger.debug(f"Bedrock failed: {type(e).__name__}")
+        # Will fallback to Groq
 
     return None
 
