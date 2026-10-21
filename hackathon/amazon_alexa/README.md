@@ -8,6 +8,34 @@ A non-diagnostic MRI **evidence** copilot for the Amazon Build, Ship, Shape hack
 - Everything works **locally and free by default** (local Whisper + browser speech). AssemblyAI (cloud speech-to-text) and Amazon Polly (cloud neural text-to-speech) are opt-in and were each validated live with a single request.
 - No LLM is called anywhere, and all case data is **synthetic**.
 
+## Run locally
+
+From the repository root:
+
+```powershell
+python -m streamlit run .\hackathon\amazon_alexa\streamlit_app.py
+```
+
+Open the localhost URL that Streamlit prints in the terminal.
+
+### One complete local demo run
+
+Everything below uses the free local defaults; no cloud provider is involved.
+
+1. On the page, choose a case under **Choose a case to analyze** (for example `case-002-change`). The Voice Assistant section further down acts on this case.
+2. Scroll to **Voice Assistant (Alexa-style simulation)**. Leave **Speech-to-text backend** on *Local Whisper (offline, free) — default* and **Text-to-speech backend** on *Browser speech (local, free) — default*.
+3. Give the first command, either way:
+   - **Voice:** record with **Record a command (push-to-talk)**, then press **Transcribe recording**. Local Whisper needs `faster-whisper` installed (see Optional setup below).
+   - **Typed:** type `Analyze this MRI` into the **Command** box.
+4. Check the text in the **Command** box (correct it if the transcript is wrong, e.g. "MI"), then press **Execute command**.
+5. Review the deterministic evidence shown under the result: intent, status, quality score, foreground percentage and change notes for the selected case.
+6. Type a name into the **Reviewer Name** field in Step 3 (above the Voice Assistant). A name spoken in the command is never used.
+7. Give the second command, by voice or typed: `Request human review`. Press **Execute command**.
+8. Confirm the **Approval** metric and the result show `PENDING_HUMAN_APPROVAL`.
+9. Optional: press **Speak response** to hear the reply through browser speech.
+
+The copilot cannot approve a case. Phrases such as "Approve this MRI" are refused and logged in **Audit trail (this session)**; approval can only come from the named human reviewer outside this assistant.
+
 ## Important Disclaimer
 
 **This is NOT a diagnostic tool.** Outputs are evidence summaries to support a human reviewer. No diagnosis or treatment recommendation is made, and the synthetic case metrics only demonstrate a workflow, not clinical or diagnostic accuracy. A qualified radiologist or physician must review the source images.
@@ -127,14 +155,12 @@ Returns a frozen record whose `approval_state` is always `PENDING_HUMAN_APPROVAL
 
 All three require human approval.
 
-## Setup and Launch (PowerShell)
+## Optional setup (PowerShell)
 
 ```powershell
 cd D:\Work\Springboard\MRI-Vision-Core-Amazon
 pip install -r requirements.txt
 pip install -r hackathon/amazon_alexa/requirements-voice.txt   # optional: faster-whisper, av<19, assemblyai, boto3
-
-streamlit run hackathon/amazon_alexa/streamlit_app.py
 ```
 
 Required: `streamlit` (1.40+ for `st.audio_input`). Optional: `faster-whisper` (offline speech-to-text; downloads a Whisper model on first use, default `base.en`), `assemblyai`, `boto3`. The app and all tests run without the optional packages.
