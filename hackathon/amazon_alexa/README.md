@@ -145,6 +145,78 @@ Returns `status`, `summary`, `quality_notes`, `change_notes` and `requires_human
 
 Returns a frozen record whose `approval_state` is always `PENDING_HUMAN_APPROVAL`. Raises `ValueError` if `reviewer_name` is empty or whitespace.
 
+### Deterministic Review Support (Step 2A)
+
+Step 2A synthesizes evidence and generates a `ReviewSupportPacket` containing:
+- **Evidence summary**: synthesized case facts, quality, foreground coverage, and status
+- **Critic findings**: deterministic quality assessment, foreground analysis, and status-based flags
+- **Reviewer checks**: actionable verification steps (image comparison, alignment, measured-change significance, documentation)
+
+The packet is **purely deterministic** and **cannot approve, modify, or create approval decisions**. It supports human reviewers with structured evidence and verification guidance. No reviewer name is captured in the packet; approval decisions remain entirely outside the copilot.
+
+### Optional Enhanced Explanation (Step 2A — LLM Extension)
+
+An optional configurable explanation provider chain adds context to the deterministic review support:
+
+1. **Amazon Bedrock** (primary when enabled) — Uses Anthropic Claude to synthesize a brief, evidence-focused explanation
+2. **Groq** (fallback when enabled) — Falls back if Bedrock is unavailable or misconfigured
+3. **Deterministic** (final fallback) — If all LLM providers fail, the deterministic review support is always used
+
+**Default behavior:** No environment configuration required. The application starts in deterministic-only mode with zero network calls. To enable LLM providers, set the environment variables below.
+
+**Safety constraints:**
+- LLMs receive only the frozen review-support packet: case ID, measurements, status, findings, and checks — no approval controls or reviewer identity
+- Output is validated: approval, diagnostic, and treatment language is rejected
+- Output is length-limited (500 characters max)
+- LLMs cannot approve, diagnose, recommend treatment, or modify evidence
+- The `PENDING_HUMAN_APPROVAL` state remains enforced
+
+**Environment variables (all optional):**
+
+| Variable | Valid Values | Default | Behavior |
+|----------|--------------|---------|----------|
+| `EXPLANATION_MODE` | `deterministic`, `auto` | `deterministic` | Selects provider chain mode. Deterministic-only makes no network calls. Auto-mode uses enabled providers if configured. |
+| `BEDROCK_ENABLED` | `true`, `false` | `false` | Enables/disables Amazon Bedrock provider. Ignored unless all other Bedrock config is present. |
+| `AWS_REGION` | Region string | None | AWS region for Bedrock (e.g., `us-east-1`). Required if Bedrock is enabled. |
+| `BEDROCK_MODEL_ID` | Model ID string | None | Bedrock model (e.g., `anthropic.claude-3-haiku-20240307-v1:0`). Required if Bedrock is enabled. |
+| `GROQ_ENABLED` | `true`, `false` | `false` | Enables/disables Groq provider. Ignored unless all other Groq config is present. |
+| `GROQ_API_KEY` | API key string | None | Groq API key. Required if Groq is enabled. |
+| `GROQ_MODEL_ID` | Model ID string | None | Groq model (e.g., `mixtral-8x7b-32768`). Required if Groq is enabled. |
+| `LLM_TIMEOUT_SECONDS` | Integer 1–60 | `10` | Timeout for LLM provider calls. Invalid values default to 10. |
+
+**Example: Enable both Bedrock and Groq (PowerShell):**
+```powershell
+$env:EXPLANATION_MODE = "auto"
+$env:BEDROCK_ENABLED = "true"
+$env:AWS_REGION = "us-east-1"
+$env:BEDROCK_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
+$env:GROQ_ENABLED = "true"
+$env:GROQ_API_KEY = "<your-api-key>"
+$env:GROQ_MODEL_ID = "mixtral-8x7b-32768"
+$env:LLM_TIMEOUT_SECONDS = "15"
+```
+
+**Example: Enable Groq only, keep Bedrock disabled:**
+```powershell
+$env:EXPLANATION_MODE = "auto"
+$env:GROQ_ENABLED = "true"
+$env:GROQ_API_KEY = "<your-api-key>"
+$env:GROQ_MODEL_ID = "mixtral-8x7b-32768"
+```
+
+**Example: Deterministic-only mode (no network calls):**
+```powershell
+# No environment variables needed; this is the default.
+# Or explicitly:
+$env:EXPLANATION_MODE = "deterministic"
+```
+
+**Security notes:**
+- Never log or display API keys, regions, or model IDs.
+- Credentials are read only from the environment; they are never embedded in code or displayed to users.
+- Invalid configuration is skipped silently; the provider chain falls back to the next option.
+- All cloud provider calls use strict timeouts and validation.
+
 ## Synthetic Demonstration Scenarios
 
 | Case | Status | Quality | Foreground | Change |

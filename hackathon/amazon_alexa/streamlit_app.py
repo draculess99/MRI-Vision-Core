@@ -15,6 +15,13 @@ if str(_repo_root) not in sys.path:
 
 import streamlit as st
 
+from hackathon.amazon_alexa.llm_explanation import (
+    MODE_AUTO,
+    MODE_DETERMINISTIC,
+    _get_explanation_mode,
+    generate_enhanced_explanation,
+)
+from hackathon.amazon_alexa.review_agents import generate_review_support
 from hackathon.amazon_alexa.tools import (
     SYNTHETIC_CASES,
     analyze_mri_evidence,
@@ -159,6 +166,78 @@ if explanation.requires_human_approval:
         "This case requires review by a named human reviewer. "
         "The copilot cannot approve cases."
     )
+
+# Step 2A: Deterministic Review Support
+st.markdown("---")
+st.markdown("### Step 2A: Deterministic Review Support")
+st.markdown(
+    "Deterministic synthesis of evidence, critic findings, and reviewer-focused checks."
+)
+
+packet = generate_review_support(evidence, explanation)
+
+st.markdown(f"**Evidence Summary:** {packet.evidence_summary}")
+
+with st.expander("Critic Findings"):
+    for finding in packet.critic_findings:
+        st.markdown(f"• {finding}")
+
+with st.expander("Reviewer Checks & Verification Steps"):
+    for check in packet.reviewer_checks:
+        st.markdown(f"{check}")
+
+st.info(
+    "ℹ️ This packet summarizes deterministic evidence and flagged concerns. "
+    "A named human reviewer must evaluate the source images and make the final "
+    "decision. The copilot cannot approve cases."
+)
+
+# Optional enhanced explanation
+st.markdown("---")
+st.markdown("#### Optional: Enhanced Explanation")
+
+# Get default mode from environment
+env_mode = _get_explanation_mode()
+default_index = 1 if env_mode == MODE_AUTO else 0
+
+exp_mode_select = st.selectbox(
+    "Explanation mode",
+    ["Deterministic only", "Auto (Bedrock → Groq → deterministic fallback)"],
+    index=default_index,
+    key="llm_explanation_mode",
+)
+
+# Determine if auto mode is selected
+use_auto_mode = exp_mode_select == "Auto (Bedrock → Groq → deterministic fallback)"
+
+# Show provider availability without exposing configuration
+if use_auto_mode:
+    st.caption("⚠️ Auto mode enabled — explanation will use configured providers if available.")
+else:
+    st.caption("Deterministic-only mode — no network calls.")
+
+if st.button("Generate enhanced explanation", key="generate_llm_explanation"):
+    with st.spinner("Generating explanation..."):
+        # Pass environment and mode to generator
+        import os
+        mode_to_use = MODE_AUTO if use_auto_mode else MODE_DETERMINISTIC
+        os.environ["EXPLANATION_MODE"] = mode_to_use
+        explanation = generate_enhanced_explanation(packet)
+        # Bind explanation to current case ID to prevent stale display
+        st.session_state["llm_explanation"] = explanation
+        st.session_state["llm_explanation_case_id"] = evidence.case_id
+
+# Display explanation only if it matches the current case (prevent stale explanations across case changes)
+if "llm_explanation" in st.session_state:
+    if st.session_state.get("llm_explanation_case_id") == evidence.case_id:
+        exp = st.session_state["llm_explanation"]
+        source_badge = f"🤖 **Source:** {exp.source}"
+        st.markdown(source_badge)
+        st.info(exp.text)
+    else:
+        # Case changed; clear stale explanation
+        st.session_state.pop("llm_explanation", None)
+        st.session_state.pop("llm_explanation_case_id", None)
 
 # Step 3: Request Approval
 st.markdown("---")
