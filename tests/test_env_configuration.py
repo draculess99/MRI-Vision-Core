@@ -45,8 +45,8 @@ def test_env_is_ignored_by_git():
 
 
 def test_env_configuration_values():
-    """Verify .env has expected default configuration."""
-    env_file = Path(__file__).parent.parent / ".env"
+    """Verify .env.example template has expected default configuration."""
+    env_file = Path(__file__).parent.parent / ".env.example"
     env_vars = {}
 
     for line in env_file.read_text().splitlines():
