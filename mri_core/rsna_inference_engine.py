@@ -23,19 +23,70 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
-import torch
-
 from .rsna_knee_dataset import TARGET_COLUMNS, RSNAKneeMetadata
-from .rsna_knee_inference import (
-    ArchitectureMismatchError,
-    CheckpointNotFoundError,
-    MalformedCheckpointError,
-    RSNAInferenceError,
-    StudyUnavailableError,
-    TargetMismatchError,
-    run_inference,
-)
-from .rsna_knee_ensemble import run_ensemble_inference
+
+# Lazy torch import: allow module to load without torch for lightweight deployments
+_torch = None
+
+def _get_torch():
+    """Lazily import torch on demand. Raises error if not available."""
+    global _torch
+    if _torch is None:
+        try:
+            import torch
+            _torch = torch
+        except ImportError:
+            raise RuntimeError(
+                "PyTorch is not installed. "
+                "Trained RSNA inference is not available in this lightweight deployment. "
+                "Install torch (pip install torch) or use the deterministic OpenCV pipeline instead."
+            )
+    return _torch
+
+
+# Lazy inference module imports: only loaded when trained inference is invoked
+_rsna_inference_modules = None
+
+def _get_inference_modules():
+    """Lazily import RSNA inference modules on demand."""
+    global _rsna_inference_modules
+    if _rsna_inference_modules is None:
+        try:
+            from .rsna_knee_inference import (
+                ArchitectureMismatchError,
+                CheckpointNotFoundError,
+                MalformedCheckpointError,
+                RSNAInferenceError,
+                StudyUnavailableError,
+                TargetMismatchError,
+                run_inference,
+            )
+            from .rsna_knee_ensemble import run_ensemble_inference
+
+            _rsna_inference_modules = {
+                "ArchitectureMismatchError": ArchitectureMismatchError,
+                "CheckpointNotFoundError": CheckpointNotFoundError,
+                "MalformedCheckpointError": MalformedCheckpointError,
+                "RSNAInferenceError": RSNAInferenceError,
+                "StudyUnavailableError": StudyUnavailableError,
+                "TargetMismatchError": TargetMismatchError,
+                "run_inference": run_inference,
+                "run_ensemble_inference": run_ensemble_inference,
+            }
+        except ImportError as e:
+            raise RuntimeError(
+                "PyTorch or RSNA dependencies not available. "
+                "Trained RSNA inference is not available in this lightweight deployment. "
+                "Install torch and dependencies or use the deterministic OpenCV pipeline instead."
+            ) from e
+    return _rsna_inference_modules
+
+
+# Define exception classes as module-level for backwards compatibility
+class InferenceEngineError(Exception):
+    """Raised for configuration-level failures (bad checkpoints, architecture mismatch) --
+    as opposed to STATUS_UNABLE_TO_EVALUATE, which is returned (not raised) for input-side
+    problems like an incomplete local study."""
 
 NON_DIAGNOSTIC_DISCLAIMER = (
     "Research prototype output. These are raw model probabilities, not calibrated "
@@ -118,6 +169,7 @@ def _load_provenance(checkpoint_path: Path) -> ModelProvenance:
     if not checkpoint_path.is_file():
         raise InferenceEngineError(f"No checkpoint file at {checkpoint_path}")
     try:
+        torch = _get_torch()
         data = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     except Exception as exc:
         raise InferenceEngineError(f"Failed to read checkpoint {checkpoint_path}: {exc}") from exc
@@ -140,6 +192,16 @@ def run_single_model_inference(
     """Run one trusted checkpoint on one study. Never raises for input-side problems --
     those come back as STATUS_UNABLE_TO_EVALUATE. Raises InferenceEngineError only for
     checkpoint/configuration problems, which are not about this particular study's input."""
+    # Lazy import of RSNA inference modules (requires torch)
+    modules = _get_inference_modules()
+    run_inference = modules["run_inference"]
+    StudyUnavailableError = modules["StudyUnavailableError"]
+    CheckpointNotFoundError = modules["CheckpointNotFoundError"]
+    MalformedCheckpointError = modules["MalformedCheckpointError"]
+    TargetMismatchError = modules["TargetMismatchError"]
+    ArchitectureMismatchError = modules["ArchitectureMismatchError"]
+    RSNAInferenceError = modules["RSNAInferenceError"]
+
     checkpoint_path = Path(checkpoint_path)
     provenance = _load_provenance(checkpoint_path)
 
@@ -179,6 +241,16 @@ def run_ensemble_model_inference(
     or incompatible, that is a configuration problem (InferenceEngineError), not a
     per-study input problem.
     """
+    # Lazy import of RSNA inference modules (requires torch)
+    modules = _get_inference_modules()
+    run_ensemble_inference = modules["run_ensemble_inference"]
+    StudyUnavailableError = modules["StudyUnavailableError"]
+    CheckpointNotFoundError = modules["CheckpointNotFoundError"]
+    MalformedCheckpointError = modules["MalformedCheckpointError"]
+    TargetMismatchError = modules["TargetMismatchError"]
+    ArchitectureMismatchError = modules["ArchitectureMismatchError"]
+    RSNAInferenceError = modules["RSNAInferenceError"]
+
     fold_checkpoint_paths = [Path(p) for p in fold_checkpoint_paths]
     provenances = [_load_provenance(p) for p in fold_checkpoint_paths]
 
@@ -258,6 +330,7 @@ def verify_ensemble_compatibility(fold_checkpoint_paths: Sequence[Path | str]) -
             mismatches.append(f"Fold {index}: checkpoint file not found at {path}")
             continue
         try:
+            torch = _get_torch()
             data = torch.load(path, map_location="cpu", weights_only=True)
         except Exception as exc:
             mismatches.append(f"Fold {index}: failed to load: {exc}")
