@@ -355,9 +355,9 @@ Do not introduce diagnoses, new findings, probabilities, or recommendations beyo
         if hasattr(e, "code"):
             http_status = e.code
         if http_status:
-            logger.debug(f"Groq failed with HTTP status: {http_status}")
+            logger.warning(f"Groq failed with HTTP status: {http_status}")
         else:
-            logger.debug(f"Groq failed: {type(e).__name__}")
+            logger.warning(f"Groq failed: {type(e).__name__}")
         # Will fallback to deterministic
 
     return None

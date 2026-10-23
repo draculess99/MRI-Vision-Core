@@ -122,9 +122,9 @@ def test_groq_logs_http_error_status_only():
             # Verify returns None (fallback behavior preserved)
             assert result is None, "Should return None on HTTP error"
 
-            # Verify debug log was called with only the HTTP status
-            mock_logger.debug.assert_called_once()
-            log_call = mock_logger.debug.call_args[0][0]
+            # Verify warning log was called with only the HTTP status
+            mock_logger.warning.assert_called_once()
+            log_call = mock_logger.warning.call_args[0][0]
             assert "429" in log_call, "Should log HTTP status code"
             assert "Too Many Requests" not in log_call, "Should not log error message"
 
@@ -167,8 +167,8 @@ def test_groq_logs_exception_class_only():
             # Verify returns None (fallback behavior preserved)
             assert result is None, "Should return None on exception"
 
-            # Verify debug log was called with only the exception class name
-            mock_logger.debug.assert_called_once()
-            log_call = mock_logger.debug.call_args[0][0]
+            # Verify warning log was called with only the exception class name
+            mock_logger.warning.assert_called_once()
+            log_call = mock_logger.warning.call_args[0][0]
             assert "TimeoutError" in log_call, "Should log exception class name"
             assert "Connection timed out" not in log_call, "Should not log exception message"
