@@ -1,5 +1,6 @@
 """Focused test for Groq User-Agent header."""
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -66,3 +67,11 @@ def test_groq_request_includes_user_agent_header():
 
         # Verify response was processed
         assert result == "test response", "Response should be parsed correctly"
+
+        # Verify the outbound request body contains the new plain-language instruction
+        request_body = json.loads(call_args[0][0].data.decode())
+        prompt_text = request_body["messages"][0]["content"]
+        assert "Write exactly three short sentences in clear, plain language" in prompt_text, \
+            "Prompt should instruct three plain-language sentences"
+        assert "does not diagnose, make clinical decisions, or approve cases" in prompt_text, \
+            "Prompt should require the non-diagnostic/non-approval disclosure"
