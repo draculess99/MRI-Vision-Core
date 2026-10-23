@@ -1,9 +1,10 @@
-"""Focused test for Groq User-Agent header."""
+"""Focused test for Groq User-Agent header and error logging."""
 
 import json
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -75,3 +76,99 @@ def test_groq_request_includes_user_agent_header():
             "Prompt should instruct three plain-language sentences"
         assert "does not diagnose, make clinical decisions, or approve cases" in prompt_text, \
             "Prompt should require the non-diagnostic/non-approval disclosure"
+
+
+def test_groq_logs_http_error_status_only():
+    """Verify Groq logs only HTTP status code on HTTP error."""
+    # Create synthetic evidence
+    evidence = MRIEvidence(
+        case_id="case-001-consistent",
+        baseline_date="2024-10-21",
+        current_date="2024-10-21",
+        quality_score=0.85,
+        foreground_percentage=45.0,
+        mean_intensity=128.0,
+        status=ReviewStatus.CONSISTENT,
+        change_description="Measured values are consistent.",
+    )
+
+    explanation = explain_review_status(evidence)
+    packet = generate_review_support(evidence, explanation)
+
+    # Mock urllib.request.urlopen to raise HTTPError
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        # Create HTTPError with status code 429 (rate limit)
+        http_error = HTTPError(
+            url="https://api.groq.com/openai/v1/chat/completions",
+            code=429,
+            msg="Too Many Requests",
+            hdrs={},
+            fp=None
+        )
+        mock_urlopen.side_effect = http_error
+
+        # Mock environment
+        env = {
+            "GROQ_ENABLED": "true",
+            "GROQ_API_KEY": "test_key",
+            "GROQ_MODEL_ID": "test_model",
+            "LLM_TIMEOUT_SECONDS": "10",
+        }
+
+        # Capture log output
+        with patch("hackathon.amazon_alexa.llm_explanation.logger") as mock_logger:
+            result = _call_groq(packet, env)
+
+            # Verify returns None (fallback behavior preserved)
+            assert result is None, "Should return None on HTTP error"
+
+            # Verify debug log was called with only the HTTP status
+            mock_logger.debug.assert_called_once()
+            log_call = mock_logger.debug.call_args[0][0]
+            assert "429" in log_call, "Should log HTTP status code"
+            assert "Too Many Requests" not in log_call, "Should not log error message"
+
+
+def test_groq_logs_exception_class_only():
+    """Verify Groq logs only exception class name on non-HTTP exception."""
+    # Create synthetic evidence
+    evidence = MRIEvidence(
+        case_id="case-001-consistent",
+        baseline_date="2024-10-21",
+        current_date="2024-10-21",
+        quality_score=0.85,
+        foreground_percentage=45.0,
+        mean_intensity=128.0,
+        status=ReviewStatus.CONSISTENT,
+        change_description="Measured values are consistent.",
+    )
+
+    explanation = explain_review_status(evidence)
+    packet = generate_review_support(evidence, explanation)
+
+    # Mock urllib.request.urlopen to raise generic exception
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        # Create a timeout exception
+        timeout_error = TimeoutError("Connection timed out")
+        mock_urlopen.side_effect = timeout_error
+
+        # Mock environment
+        env = {
+            "GROQ_ENABLED": "true",
+            "GROQ_API_KEY": "test_key",
+            "GROQ_MODEL_ID": "test_model",
+            "LLM_TIMEOUT_SECONDS": "10",
+        }
+
+        # Capture log output
+        with patch("hackathon.amazon_alexa.llm_explanation.logger") as mock_logger:
+            result = _call_groq(packet, env)
+
+            # Verify returns None (fallback behavior preserved)
+            assert result is None, "Should return None on exception"
+
+            # Verify debug log was called with only the exception class name
+            mock_logger.debug.assert_called_once()
+            log_call = mock_logger.debug.call_args[0][0]
+            assert "TimeoutError" in log_call, "Should log exception class name"
+            assert "Connection timed out" not in log_call, "Should not log exception message"

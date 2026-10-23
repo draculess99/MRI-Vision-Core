@@ -349,9 +349,16 @@ Do not introduce diagnoses, new findings, probabilities, or recommendations beyo
                 text = result["choices"][0].get("message", {}).get("content", "").strip()
                 return text if text else None
 
-    except Exception:
-        # Silently fail; will fallback to deterministic
-        pass
+    except Exception as e:
+        # Log safe failure category only (no message, URL, headers, or payloads)
+        http_status = None
+        if hasattr(e, "code"):
+            http_status = e.code
+        if http_status:
+            logger.debug(f"Groq failed with HTTP status: {http_status}")
+        else:
+            logger.debug(f"Groq failed: {type(e).__name__}")
+        # Will fallback to deterministic
 
     return None
 
