@@ -312,18 +312,14 @@ def _call_groq(packet: ReviewSupportPacket, env: Optional[dict[str, str]] = None
     try:
         timeout = _get_llm_timeout(env)
 
-        # Non-diagnostic prompt with plain-language output instructions
-        prompt = f"""Review assistant. No diagnosis, treatment, or approval language.
+        # Compact, non-diagnostic prompt (keep short to fit response in 500-char limit)
+        prompt = f"""Review assistant. Concise summary only. No diagnosis, treatment, or approval language.
 
 Evidence: {packet.evidence_summary[:100]}
 
 Key findings: {', '.join(packet.critic_findings[:2])}
 
-Write exactly three short sentences in clear, plain language for a non-specialist workflow user.
-Explain the supplied evidence and deterministic review status without listing raw metric values unless essential.
-State what a named human reviewer should verify next.
-State that this copilot does not diagnose, make clinical decisions, or approve cases.
-Do not introduce diagnoses, new findings, probabilities, or recommendations beyond the supplied evidence."""
+Summary (max 150 chars):"""
 
         body = json.dumps({
             "model": model_id,

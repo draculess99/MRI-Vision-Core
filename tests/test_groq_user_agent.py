@@ -69,13 +69,13 @@ def test_groq_request_includes_user_agent_header():
         # Verify response was processed
         assert result == "test response", "Response should be parsed correctly"
 
-        # Verify the outbound request body contains the new plain-language instruction
+        # Verify the outbound request body contains the concise output instruction
         request_body = json.loads(call_args[0][0].data.decode())
         prompt_text = request_body["messages"][0]["content"]
-        assert "Write exactly three short sentences in clear, plain language" in prompt_text, \
-            "Prompt should instruct three plain-language sentences"
-        assert "does not diagnose, make clinical decisions, or approve cases" in prompt_text, \
-            "Prompt should require the non-diagnostic/non-approval disclosure"
+        assert "Summary (max 150 chars):" in prompt_text, \
+            "Prompt should instruct a concise summary"
+        assert "Concise summary only" in prompt_text, \
+            "Prompt should emphasize conciseness"
 
 
 def test_groq_logs_http_error_status_only():
