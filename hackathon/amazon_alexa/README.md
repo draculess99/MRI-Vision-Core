@@ -88,16 +88,25 @@ graph TD
     A["Streamlit UI<br/>(typed or push-to-talk)"]
     A --> B["STT: Local Whisper<br/>(default)"]
     B --> C{"Evidence Source?"}
-    C -->|Synthetic<br/>default| D["Synthetic<br/>Case"]
-    C -->|Local images<br/>if enabled| E["Local Image<br/>Adapter"]
-    D --> F["Deterministic<br/>Evidence &<br/>Review Support"]
+
+    C -->|Synthetic default| D["Synthetic Case"]
+    C -->|Private local images<br/>when enabled| E["Local Image Adapter"]
+
+    D --> F["Deterministic Evidence<br/>& Review Support"]
     E --> F
-    F --> G["Voice Router<br/>Non-diagnostic<br/>Response"]
-    G --> H["TTS: Browser speech<br/>(default)"]
-    H --> I{"Request Human<br/>Review?"}
-    I -->|No| J["Command Complete"]
-    I -->|Yes<br/>named reviewer| K["PENDING_<br/>HUMAN_APPROVAL"]
-    K --> L["✗ Copilot<br/>Cannot Approve"]
+
+    F --> G{"Explanation Path?"}
+    G -->|Synthetic case,<br/>Auto mode| H["Optional explanation<br/>Amazon Bedrock → Groq →<br/>deterministic fallback"]
+    G -->|Local images or<br/>deterministic mode| I["Deterministic explanation"]
+
+    H --> J["Voice Router<br/>Non-diagnostic response"]
+    I --> J
+    J --> K["TTS: Browser speech<br/>(default)"]
+
+    K --> L{"Request human review?"}
+    L -->|No| M["Command complete"]
+    L -->|Yes: named reviewer| N["PENDING_<br/>HUMAN_APPROVAL"]
+    N --> O["Copilot cannot approve"]
 ```
 
 Local-image mode is in-memory, non-diagnostic, and disables Bedrock, Groq, AssemblyAI, and Polly.
