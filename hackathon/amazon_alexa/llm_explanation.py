@@ -347,7 +347,13 @@ Do not introduce diagnoses, new findings, probabilities, or recommendations beyo
             result = json.loads(response.read().decode())
             if result.get("choices") and len(result["choices"]) > 0:
                 text = result["choices"][0].get("message", {}).get("content", "").strip()
-                return text if text else None
+                if text:
+                    valid, error = _validate_explanation_output(text)
+                    if valid:
+                        return text
+                    logger.warning("Groq response rejected by output validation")
+                    return None
+                return None
 
     except Exception as e:
         # Log safe failure category only (no message, URL, headers, or payloads)

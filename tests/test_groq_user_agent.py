@@ -172,3 +172,52 @@ def test_groq_logs_exception_class_only():
             log_call = mock_logger.warning.call_args[0][0]
             assert "TimeoutError" in log_call, "Should log exception class name"
             assert "Connection timed out" not in log_call, "Should not log exception message"
+
+
+def test_groq_logs_validation_rejection():
+    """Verify Groq logs when response fails output validation."""
+    # Create synthetic evidence
+    evidence = MRIEvidence(
+        case_id="case-001-consistent",
+        baseline_date="2024-10-21",
+        current_date="2024-10-21",
+        quality_score=0.85,
+        foreground_percentage=45.0,
+        mean_intensity=128.0,
+        status=ReviewStatus.CONSISTENT,
+        change_description="Measured values are consistent.",
+    )
+
+    explanation = explain_review_status(evidence)
+    packet = generate_review_support(evidence, explanation)
+
+    # Mock urllib.request.urlopen to return a response with approval language
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        # Set up mock response with invalid content (contains "approve")
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{"choices": [{"message": {"content": "This case is approved."}}]}'
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        # Mock environment
+        env = {
+            "GROQ_ENABLED": "true",
+            "GROQ_API_KEY": "test_key",
+            "GROQ_MODEL_ID": "test_model",
+            "LLM_TIMEOUT_SECONDS": "10",
+        }
+
+        # Capture log output
+        with patch("hackathon.amazon_alexa.llm_explanation.logger") as mock_logger:
+            result = _call_groq(packet, env)
+
+            # Verify returns None (validation rejection)
+            assert result is None, "Should return None when response fails validation"
+
+            # Verify warning log was called with validation rejection message
+            mock_logger.warning.assert_called_once()
+            log_call = mock_logger.warning.call_args[0][0]
+            assert "Groq response rejected by output validation" in log_call, \
+                "Should log validation rejection message"
+            assert "approved" not in log_call.lower(), "Should not log the rejected response text"
