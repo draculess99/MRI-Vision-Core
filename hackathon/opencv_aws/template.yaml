@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  OpenCV MRI Evidence Manifest Lambda Function.
+  Non-diagnostic, research-only. Local deterministic processing only.
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 1024
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        # No environment variables required
+        LOG_LEVEL: INFO
+
+Resources:
+  OpenCVMRIManifestFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      DockerContext: ../..
+      Dockerfile: hackathon/opencv_aws/Dockerfile
+      DockerTag: mri-opencv-evidence-local
+    Properties:
+      FunctionName: opencv-mri-evidence-manifest-url-demo
+      Description: >-
+        Deterministic OpenCV MRI processing pipeline with evidence manifest.
+        Non-diagnostic, research-only.
+      PackageType: Image
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: BUFFERED
+        Cors:
+          AllowMethods:
+            - POST
+          AllowHeaders:
+            - Content-Type
+          AllowOrigins:
+            - '*'
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # Lambda execution role only; no S3, DynamoDB, API, or other resource access
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: arn:aws:logs:*:*:*
+
+Outputs:
+  FunctionArn:
+    Description: ARN of the OpenCV MRI Evidence Manifest Lambda function
+    Value: !GetAtt OpenCVMRIManifestFunction.Arn
+
+  FunctionName:
+    Description: Name of the OpenCV MRI Evidence Manifest Lambda function
+    Value: !Ref OpenCVMRIManifestFunction
+
+  FunctionUrl:
+    Description: HTTPS endpoint for OpenCV MRI evidence manifest processing
+    Value: !GetAtt OpenCVMRIManifestFunctionUrl.FunctionUrl
