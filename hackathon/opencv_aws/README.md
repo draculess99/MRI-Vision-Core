@@ -12,40 +12,29 @@ https://gpint2fywbzbcy5crjldc2j6oi0pmxyb.lambda-url.us-east-1.on.aws/
 
 ## Architecture
 
+### Interactive Visual Demo — Railway Streamlit
+
 ```mermaid
-graph TD
-    subgraph Interactive["Interactive Demo — Railway Streamlit"]
-        A["PNG/JPG Input<br/>(upload)"] --> B["Streamlit Interface"]
-        B --> C["Execution Router<br/>(local-first)"]
-        C --> D["Deterministic OpenCV<br/>Pipeline"]
-        D --> E["Four Artifacts"]
-        E --> F1["Original<br/>(normalized)"]
-        E --> F2["Enhanced<br/>(CLAHE)"]
-        E --> F3["Edges<br/>(Canny)"]
-        E --> F4["Overlay<br/>(green edges)"]
-        D --> G["Evidence Manifest<br/>(SHA-256, metadata)"]
-        G --> H["ChangeGuard<br/>Baseline Comparison"]
-        H --> I["Deterministic Review<br/>Evidence + Safety Check"]
-    end
+flowchart TD
+    A["PNG/JPG user input"] --> B["Railway Streamlit demo"]
+    B --> C["Execution Router"]
+    C --> D["Local deterministic<br/>OpenCV pipeline"]
+    D --> E["OpenCV artifacts<br/>Enhanced • Edges • Overlay"]
+    D --> F["Evidence manifest<br/>SHA-256 + processing metadata"]
+    F --> G["ChangeGuard<br/>baseline comparison"]
+    G --> H["Evidence Review Agent<br/>deterministic rules"]
+    H --> I["One auditable outcome<br/>FINALIZE_EVIDENCE_BUNDLE<br/>REQUEST_MORE_EVIDENCE<br/>PENDING_HUMAN_APPROVAL"]
+```
 
-    subgraph AWS_API["AWS Lambda API — Evidence Manifest"]
-        J["Repository Sample<br/>JSON Event"] --> K["AWS Lambda<br/>Function URL"]
-        K --> L["Lambda Container<br/>OpenCV 5"]
-        L --> M["JSON Evidence<br/>Manifest Response"]
-    end
+The interactive Streamlit demo executes locally and does not invoke AWS Lambda, an external API, or an LLM.
 
-    style A fill:#e1f5ff
-    style B fill:#fff3e0
-    style C fill:#f3e5f5
-    style D fill:#e8f5e9
-    style E fill:#fce4ec
-    style G fill:#fff8e1
-    style H fill:#ede7f6
-    style I fill:#e0f2f1
-    style J fill:#e3f2fd
-    style K fill:#bbdefb
-    style L fill:#90caf9
-    style M fill:#64b5f6
+### Evidence-Manifest API — AWS Lambda
+
+```mermaid
+flowchart TD
+    A["Repository sample<br/>JSON event"] --> B["AWS Lambda<br/>Function URL"]
+    B --> C["Lambda container<br/>OpenCV 5"]
+    C --> D["JSON evidence-manifest<br/>response"]
 ```
 
 ## Included Synthetic Walkthrough Input
@@ -69,11 +58,47 @@ The repository includes `synthetic_knee_mri_phantom_1.png` as the reproducible i
    - Mean intensity delta: absolute difference in pixel means
    - **STABLE** if both below thresholds (≥15%, ≥20 counts)
    - **REVIEW** if thresholds exceeded
-5. **Run evidence review**:
-   - Click "Run Agentic Evidence Review"
-   - See three deterministic agent summaries (Evidence Specialist, Safety Critic, Consensus Coordinator)
-   - Final decision: `NO_ACTION`, `REQUEST_MORE_EVIDENCE`, or `PENDING_HUMAN_APPROVAL`
+5. **Agentic Evidence Review** (automatic):
+   - Deterministic agent evaluates manifest and baseline comparison
+   - Three possible outcomes:
+     - **FINALIZE_EVIDENCE_BUNDLE**: All artifacts present, processing deterministic, baseline stable or first-run
+     - **REQUEST_MORE_EVIDENCE**: ChangeGuard triggered REVIEW, or artifact evidence incomplete
+     - **PENDING_HUMAN_APPROVAL**: Metadata malformed, dimensions invalid, or unexpected state
+   - View expandable JSON audit trace for full decision details
 6. **Inspect evidence manifest**: View SHA-256, processing steps, and artifact names
+
+## Agentic Evidence Review
+
+The Agentic Evidence Review is a **deterministic, rule-based evidence-validation system** that evaluates the OpenCV manifest and ChangeGuard baseline comparison to produce an outcome. It is **not an LLM** and **not a diagnostic system**. It consumes the evidence already produced by the pipeline and applies fixed decision rules.
+
+### How It Works
+
+The agent executes a three-step audit trace:
+
+1. **validate_manifest**: Checks that the evidence manifest is complete and well-formed (required fields present, processing steps marked deterministic, all four artifacts generated, image dimensions valid).
+2. **assess_change_guard**: Evaluates the ChangeGuard baseline comparison result (STABLE, REVIEW, or INVALID). First-run conditions with no prior baseline are expected; other INVALID results warrant investigation.
+3. **choose_next_action**: Applies decision precedence rules to determine the outcome.
+
+### Outcomes
+
+The agent produces exactly one of three outcomes:
+
+- **FINALIZE_EVIDENCE_BUNDLE**: All artifacts present, all processing steps marked deterministic, baseline stable or first-run condition. The evidence bundle is ready for inspection.
+- **REQUEST_MORE_EVIDENCE**: Recoverable evidence gaps detected (e.g., ChangeGuard triggered REVIEW, missing artifacts, non-deterministic steps). User can re-upload or refine input.
+- **PENDING_HUMAN_APPROVAL**: Unrecoverable manifest errors (e.g., invalid dimensions, unexpected data type, malformed metadata). **This outcome cannot be silently finalized or bypassed.** Manual review is required.
+
+### Implementation
+
+- **Non-diagnostic**: No medical claims. Evidence review documents processing metadata only.
+- **Deterministic**: Same input always produces identical output and audit trace.
+- **Local execution**: The Streamlit demo runs the agent locally. No Lambda invocation, no external API calls, no LLM.
+- **Auditable**: Full decision trace (observations, tool steps, outcome) exported as JSON for inspection.
+
+### Walkthrough
+
+![Agentic Evidence Review overview: deterministic evidence-based finalization decision.](../../docs/images/opencv_aws_demo/09-agentic-evidence-overview.png)
+
+![Agentic Evidence Review audit trace: OpenCV evidence observations, decision, and next action.](../../docs/images/opencv_aws_demo/10-agentic-trace-finalize.png)
 
 ## Verification
 
@@ -89,12 +114,18 @@ pytest tests/test_streamlit_app_torch_free.py -v
 ```
 The fresh-process Torch-optional regression test blocks `torch` and verifies that a Torch import does not prevent application startup. It specifically guards against the prior Railway `ModuleNotFoundError: No module named 'torch'`; it does not assert successful startup when other required dependencies are absent.
 
-**Evidence review tests:**
+**Evidence Review Agent tests:**
+```bash
+pytest tests/test_opencv_review_agents.py -v
+```
 Deterministic review agent tests in `tests/test_opencv_review_agents.py` verify:
-- Evidence Specialist correctly summarizes manifest and ChangeGuard facts
-- Safety Critic detects missing evidence and forbids diagnostic language
-- Consensus Coordinator returns correct final decision for each scenario
-- All decisions are deterministic (same input always produces same output)
+- **FINALIZE_EVIDENCE_BUNDLE**: Valid manifest + stable/first-run comparison
+- **REQUEST_MORE_EVIDENCE**: ChangeGuard REVIEW or incomplete artifacts
+- **PENDING_HUMAN_APPROVAL**: Malformed metadata, invalid dimensions, unexpected dtype
+- Safety notice present in all outcomes
+- All outcomes have auditable JSON trace with tool steps
+- Deterministic reproducibility: same inputs → byte-for-byte identical trace
+- No diagnostic language anywhere in reasoning or next actions
 
 ## AWS and Deployment
 

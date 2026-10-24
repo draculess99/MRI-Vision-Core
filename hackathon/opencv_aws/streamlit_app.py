@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from hackathon.opencv_aws.change_guard import ChangeGuard
 from hackathon.opencv_aws.opencv_adapter import OpenCVProcessor
+from hackathon.opencv_aws.evidence_review_agent import review_evidence
 from mri_core.config import load_execution_config
 from mri_core.execution import ExecutionRouter
 
@@ -35,36 +36,63 @@ st.warning(
     "It is not a diagnostic medical tool and does not provide clinical interpretation."
 )
 
-# Sidebar for input method selection
-st.sidebar.header("Input")
-input_method = st.sidebar.radio(
-    "Select input method:",
-    ["Upload an image"],
+# Sidebar for demo mode selection
+demo_mode = st.sidebar.radio(
+    "Select demo mode:",
+    ["OpenCV Image Processing", "Trained MRI Inference — Research Only"],
+    key="demo_mode",
 )
 
-# Load image based on input method
-image_array = None
-image_source = ""
+# OpenCV Image Processing mode
+if demo_mode == "OpenCV Image Processing":
+    st.sidebar.header("Input")
 
-if input_method == "Upload an image":
-    uploaded_file = st.sidebar.file_uploader(
-        "Upload a PNG or JPG image:",
-        type=["png", "jpg", "jpeg"],
+    input_method = st.sidebar.radio(
+        "Select input method:",
+        ["Use bundled demo image", "Upload an image"],
+        index=0,
     )
 
-    if uploaded_file is not None:
-        try:
-            pil_image = Image.open(uploaded_file)
+    # Load image based on input method
+    image_array = None
+    image_source = ""
 
-            # Convert to grayscale if needed
-            if pil_image.mode != "L":
-                pil_image = pil_image.convert("L")
+    if input_method == "Use bundled demo image":
+        # Load the bundled real knee MRI demonstration image
+        bundled_path = ROOT / "docs" / "images" / "opencv_aws_demo" / "real_knee_mri_original.png"
+        if bundled_path.exists():
+            try:
+                demo_image = cv2.imread(str(bundled_path), cv2.IMREAD_GRAYSCALE)
+                if demo_image is not None:
+                    image_array = demo_image.astype(np.float32)
+                    image_source = f"Demo image: {bundled_path.name}"
+                    st.sidebar.success(f"Loaded: {bundled_path.name}")
+                else:
+                    st.sidebar.error("Failed to read demo image")
+            except Exception as e:
+                st.sidebar.error(f"Error loading demo image: {e}")
+        else:
+            st.sidebar.warning(f"Demo image not found at {bundled_path}")
 
-            image_array = np.array(pil_image, dtype=np.float32)
-            image_source = f"Uploaded: {uploaded_file.name}"
-            st.sidebar.success(f"Loaded: {uploaded_file.name}")
-        except Exception as e:
-            st.sidebar.error(f"Error loading uploaded image: {e}")
+    elif input_method == "Upload an image":
+        uploaded_file = st.sidebar.file_uploader(
+            "Upload a PNG or JPG image:",
+            type=["png", "jpg", "jpeg"],
+        )
+
+        if uploaded_file is not None:
+            try:
+                pil_image = Image.open(uploaded_file)
+
+                # Convert to grayscale if needed
+                if pil_image.mode != "L":
+                    pil_image = pil_image.convert("L")
+
+                image_array = np.array(pil_image, dtype=np.float32)
+                image_source = f"Uploaded: {uploaded_file.name}"
+                st.sidebar.success(f"Loaded: {uploaded_file.name}")
+            except Exception as e:
+                st.sidebar.error(f"Error loading uploaded image: {e}")
 
 # Main content
 st.subheader("OpenCV Image Processing Pipeline")
@@ -224,6 +252,44 @@ if image_array is not None:
                         st.subheader("Evidence Manifest")
                         hash_val = manifest.get("source_hash_sha256", "N/A")[:16] + "..."
                         st.code(f"SHA-256: {hash_val}", language="text")
+
+                    # Agentic Evidence Review
+                    st.markdown("---")
+                    st.subheader("Agentic Evidence Review")
+
+                    if manifest and enhanced_img is not None:
+                        comparison_dict = comparison.to_dict() if comparison else None
+                        agent_decision = review_evidence(manifest, comparison_dict)
+
+                        # Display outcome with appropriate color
+                        if agent_decision.outcome.value == "FINALIZE_EVIDENCE_BUNDLE":
+                            st.success(
+                                f"✓ **{agent_decision.outcome.value}**"
+                            )
+                        elif agent_decision.outcome.value == "REQUEST_MORE_EVIDENCE":
+                            st.warning(
+                                f"⚠ **{agent_decision.outcome.value}**"
+                            )
+                        else:  # PENDING_HUMAN_APPROVAL
+                            st.error(
+                                f"🚨 **{agent_decision.outcome.value}**"
+                            )
+
+                        # Display reasoning and next action
+                        st.markdown(f"**Reasoning:** {agent_decision.reasoning}")
+                        st.markdown(f"**Next Action:** {agent_decision.next_action.user_facing_text}")
+
+                        if agent_decision.human_approval_required:
+                            st.error(
+                                "⚠️ **Human approval required before proceeding.**"
+                            )
+
+                        # Expandable trace
+                        with st.expander("View detailed audit trace (JSON)"):
+                            st.json(agent_decision.trace.to_dict())
+
+                        # Safety notice
+                        st.caption(f"ℹ️ {agent_decision.safety_notice}")
 
             except Exception as e:
                 st.error(f"Processing error: {e}")
