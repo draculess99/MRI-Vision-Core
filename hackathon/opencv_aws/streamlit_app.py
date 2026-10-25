@@ -49,7 +49,7 @@ if demo_mode == "OpenCV Image Processing":
 
     input_method = st.sidebar.radio(
         "Select input method:",
-        ["Use bundled demo image", "Upload an image"],
+        ["Use bundled demo image", "Upload an image", "Use calibrated synthetic sample"],
         index=0,
     )
 
@@ -93,6 +93,24 @@ if demo_mode == "OpenCV Image Processing":
                 st.sidebar.success(f"Loaded: {uploaded_file.name}")
             except Exception as e:
                 st.sidebar.error(f"Error loading uploaded image: {e}")
+
+    elif input_method == "Use calibrated synthetic sample":
+        # Load the calibrated synthetic demonstration image
+        calibrated_path = ROOT / "sample_data" / "opencv_aws" / "Synthetic Knee MRI With Calibration Patch-2.png"
+        if calibrated_path.exists():
+            try:
+                demo_image = cv2.imread(str(calibrated_path), cv2.IMREAD_GRAYSCALE)
+                if demo_image is not None:
+                    image_array = demo_image.astype(np.float32)
+                    image_source = f"Calibration sample: {calibrated_path.name}"
+                    st.sidebar.success(f"Loaded: {calibrated_path.name}")
+                    st.sidebar.info("This is a synthetic calibration demonstration image, not patient data, and not intended for clinical use.")
+                else:
+                    st.sidebar.error("Failed to read calibration sample")
+            except Exception as e:
+                st.sidebar.error(f"Error loading calibration sample: {e}")
+        else:
+            st.sidebar.warning(f"Calibration sample not found at {calibrated_path}")
 
 # Main content
 st.subheader("OpenCV Image Processing Pipeline")
