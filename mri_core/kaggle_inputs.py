@@ -104,3 +104,46 @@ def locate_inputs_package(root: Path, kind: str, *, max_depth: int = 3, override
     if bad:
         raise InputsError("hash_mismatch", f"files do not match PROVENANCE.json hashes: {bad}", diag)
     return folder, prov
+
+
+def download_verified(url: str, dest: Path, expected_sha256: str, *, connect_timeout: float = 30.0, total_timeout: float = 300.0, max_bytes: int = 200_000_000,
+                      opener=None) -> dict:
+    """Fetch `url` (HTTPS only) to `dest`, bounded in time and size, and keep the file only if its full SHA-256 equals `expected_sha256`.
+
+    Fails closed: any problem raises InputsError and leaves no file at `dest`. A file already at `dest` is re-verified, never trusted. Returns {"bytes", "sha256", "downloaded"}.
+    """
+    import time
+    import urllib.request
+    from urllib.parse import urlparse
+
+    if urlparse(url).scheme != "https":
+        raise InputsError("insecure_url", f"refusing a non-HTTPS URL: {url}", {})
+    dest = Path(dest)
+    if dest.is_file():
+        if sha256_file(dest) == expected_sha256:
+            return {"bytes": dest.stat().st_size, "sha256": expected_sha256, "downloaded": False}
+        dest.unlink()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    temp = dest.with_suffix(dest.suffix + f".{os.getpid()}.part")
+    opener = opener or (lambda u: urllib.request.urlopen(u, timeout=connect_timeout))
+    digest, size, started = hashlib.sha256(), 0, time.monotonic()
+    try:
+        with opener(url) as response, open(temp, "wb") as handle:
+            for chunk in iter(lambda: response.read(1 << 20), b""):
+                size += len(chunk)
+                if size > max_bytes:
+                    raise InputsError("too_large", f"download exceeded {max_bytes} bytes", {})
+                if time.monotonic() - started > total_timeout:
+                    raise InputsError("timeout", f"download exceeded {total_timeout} s", {})
+                digest.update(chunk)
+                handle.write(chunk)
+        if digest.hexdigest() != expected_sha256:
+            raise InputsError("hash_mismatch", f"downloaded file has SHA-256 {digest.hexdigest()}, expected {expected_sha256}", {"bytes": size})
+        temp.replace(dest)
+    except InputsError:
+        temp.unlink(missing_ok=True)
+        raise
+    except Exception as error:  # network, DNS, TLS, HTTP, disk
+        temp.unlink(missing_ok=True)
+        raise InputsError("download_failed", f"{type(error).__name__}: {error}", {}) from error
+    return {"bytes": size, "sha256": expected_sha256, "downloaded": True}

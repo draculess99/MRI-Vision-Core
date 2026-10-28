@@ -1,6 +1,6 @@
 """Phase 19B bounded GPU smoke test (PREPARED, NOT LAUNCHED): pretrained ConvNeXt-T arm D, TRAINING studies only, no labels used.
 
-  verify code bundle, the torchvision ImageNet-1K weights (SHA-256) and the frozen seed-201 partition; build arm D with the pretrained trunk and fresh heads; for batch sizes 2, 3, 4
+  verify code bundle, download the torchvision ImageNet-1K weights from the official URL (HTTPS, bounded, full SHA-256, fail closed) and the frozen seed-201 partition; build arm D with the pretrained trunk and fresh heads; for batch sizes 2, 3, 4
   run two AMP train steps (finite loss and gradients, peak VRAM, speed; an out-of-memory is recorded, not fatal); save a full resumable checkpoint and reload it into fresh objects.
 Smoke labels are synthetic coin flips on two targets: they exist only to drive a backward pass and are never used for any result. At most 8 registered TRAINING studies are read.
 """
@@ -93,7 +93,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 from kaggle_rsna_runner import device_info, discover_data  # noqa: E402
-from mri_core.kaggle_inputs import InputsError, locate_inputs_package  # noqa: E402
+from mri_core.kaggle_inputs import InputsError, download_verified, locate_inputs_package  # noqa: E402
 from mri_core.rsna_checkpoint import load_checkpoint, save_checkpoint  # noqa: E402
 from mri_core.rsna_knee_dataset import TARGET_COLUMNS, load_rsna_metadata  # noqa: E402
 from mri_core.weak_label_data import WeakLabelDicomDataset, assert_no_leakage, hash_split, load_weak_manifest  # noqa: E402
@@ -107,16 +107,20 @@ if not env["cuda_available"] and not DRY:
 device = torch.device("cuda" if env["cuda_available"] else "cpu")
 REG = json.loads((code / "configs" / "phase17_registry.json").read_text())
 
-# ---- weights: official torchvision ImageNet-1K file, hash-pinned
+# ---- weights: official torchvision ImageNet-1K file, downloaded from the official URL (internet-on kernel), full SHA-256 enforced; no random-initialisation fallback
+WEIGHTS_URL = "https://download.pytorch.org/models/convnext_tiny-983f1562.pth"
+WEIGHTS = WORKING / "weights" / "convnext_tiny-983f1562.pth"
+local = os.environ.get("P19_WEIGHTS_LOCAL_FILE")  # local CPU rehearsal only: an existing file, still hash-verified
 try:
-    WDIR, WPROV = locate_inputs_package(INPUT, "phase19_weights", override=os.environ.get("P19_WEIGHTS"))
+    if local:
+        WEIGHTS.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(local, WEIGHTS)
+    SUMMARY["weights"] = {"url": WEIGHTS_URL, "sha256": EXPECTED_WEIGHTS_SHA256, "source": "local rehearsal file" if local else "official download",
+                          **download_verified(WEIGHTS_URL, WEIGHTS, EXPECTED_WEIGHTS_SHA256, connect_timeout=30, total_timeout=300),
+                          "license_note": "not stated by torchvision for the weights; research use only; not redistributed by this project"}
 except InputsError as error:
-    SUMMARY["weights_diagnosis"] = {"code": error.code, **error.diagnostics}
-    stop(f"weights package problem ({error.code}): {error}")
-WEIGHTS = WDIR / "convnext_tiny-983f1562.pth"
-if sha(WEIGHTS) != EXPECTED_WEIGHTS_SHA256:
-    stop("the weights file is not the expected torchvision convnext_tiny IMAGENET1K_V1 file")
-SUMMARY["weights"] = {"sha256": EXPECTED_WEIGHTS_SHA256, "source": WPROV.get("source_url"), "license_note": WPROV.get("license_note")}
+    SUMMARY["weights_diagnosis"] = {"code": error.code, "message": str(error)[:300]}
+    stop(f"pretrained weights unavailable ({error.code}); no random-initialisation fallback")
 
 # ---- inputs and the frozen seed-201 partition (training studies only)
 try:
