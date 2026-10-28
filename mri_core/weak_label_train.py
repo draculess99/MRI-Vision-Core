@@ -138,6 +138,11 @@ class InMemoryWeakDataset(Dataset):
                 "target_mask": torch.from_numpy(self.masks[i]), "valid": torch.tensor(True), "study_uid": self.ids[i]}
 
 
+def _roi_inputs(batch, device) -> dict:
+    """Optional ROI boxes carried by a batch (Phase 19A ROI models); empty for every earlier arm, whose forward() takes only (images, mask)."""
+    return {k: batch[k].to(device) for k in ("rois", "roi_valid") if k in batch}
+
+
 def _device(config: dict, override: Optional[str]) -> torch.device:
     name = override or config.get("device", "auto")
     return torch.device("cuda" if name == "auto" and torch.cuda.is_available() else "cpu") if name == "auto" else torch.device(name)
@@ -287,7 +292,7 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
                 batch_hook(epoch, step)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=torch_device.type, dtype=amp_dtype, enabled=use_amp):
-                logits = model(batch["images"].to(torch_device), batch["mask"].to(torch_device))
+                logits = model(batch["images"].to(torch_device), batch["mask"].to(torch_device), **_roi_inputs(batch, torch_device))
             loss = masked_bce(logits, batch["labels"].to(torch_device), batch["target_mask"].to(torch_device),
                               pos_weight, reliability)
             if scaler is not None and use_amp:
@@ -327,7 +332,7 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
         v_losses, v_labels, v_probs, v_masks = [], [], [], []
         with torch.no_grad():
             for batch in val_loader:
-                logits = model(batch["images"].to(torch_device), batch["mask"].to(torch_device))
+                logits = model(batch["images"].to(torch_device), batch["mask"].to(torch_device), **_roi_inputs(batch, torch_device))
                 v_losses.append(float(masked_bce(logits, batch["labels"].to(torch_device),
                                                  batch["target_mask"].to(torch_device), pos_weight, reliability).cpu()))
                 v_labels.append(batch["labels"].numpy())
@@ -395,7 +400,7 @@ def predict_probabilities(model: nn.Module, dataset, device: torch.device, batch
     uids, rows = [], []
     with torch.inference_mode():
         for batch in loader:
-            rows.append(model(batch["images"].to(device), batch["mask"].to(device)).float().sigmoid().cpu().numpy())
+            rows.append(model(batch["images"].to(device), batch["mask"].to(device), **_roi_inputs(batch, device)).float().sigmoid().cpu().numpy())
             uids.extend(batch["study_uid"])
     return uids, np.vstack(rows)
 

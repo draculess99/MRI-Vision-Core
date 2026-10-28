@@ -219,4 +219,7 @@ def build_model(arm: str, config: dict) -> nn.Module:
         return RSNAKneePretrainedMIL(planes, dropout, pretrained_path=Path(path) if path else None,
                                      freeze_bn=bool(config.get("freeze_bn", True)), input_size=config.get("encoder_input_size"),
                                      sequence=config.get("sequence", "none"))
+    if arm in ("D", "E"):  # Phase 19A ConvNeXt-T arms (kept out of ARMS so the original arm set and its callers are unchanged)
+        from .convnext_roi import build_convnext_model
+        return build_convnext_model(arm, config)
     raise ValueError(f"Unknown arm {arm!r}; expected one of {ARMS}")
