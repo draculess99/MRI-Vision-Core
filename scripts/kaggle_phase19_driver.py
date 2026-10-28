@@ -28,6 +28,7 @@ TINY = bool(os.environ.get("P19_TINY"))  # CPU rehearsal with a small ConvNeXt
 MODE = os.environ.get("P19_MODE", "full")  # "stability": bounded T4 rehearsal on registered TRAINING studies only (no scoring, no metadata baselines); "full": the experiment
 ACCUM = int(os.environ.get("P19_ACCUM", "2"))  # batch 2 x accumulation 2 = effective 4 per optimizer update
 STABILITY_STUDIES = int(os.environ.get("P19_STABILITY_STUDIES", "48"))
+MAX_SECONDS = int(os.environ.get("P19_MAX_SECONDS", str(6 * 3600)))  # trainer pauses cleanly between epochs after this budget (Kaggle session limit is 9 h)
 # Full run: the registered seed-201 partition needs 0.2 (962 train / 238 validation). Stability run: its studies come from the registered TRAINING partition (hash >= 0.2), so re-splitting
 # with 0.2 leaves no validation study (Phase 19C v1 failure); 0.4 makes the hash band [0.2, 0.4) of those training studies an INTERNAL health-check set.
 VAL_FRACTION = 0.2 if MODE == "full" else 0.4
@@ -120,7 +121,7 @@ import pandas as pd  # noqa: E402
 import torch  # noqa: E402
 from kaggle_rsna_runner import device_info, discover_data  # noqa: E402
 from mri_core import weak_label_confound as wc  # noqa: E402
-from mri_core.kaggle_inputs import InputsError, download_verified, locate_inputs_package  # noqa: E402
+from mri_core.kaggle_inputs import InputsError, download_verified, find_named_files, locate_inputs_package  # noqa: E402
 from mri_core.weak_label_train import analyze_update_log  # noqa: E402
 from mri_core.weak_label_data import stability_split_preflight  # noqa: E402
 from mri_core.rsna_knee_dataset import TARGET_COLUMNS, load_rsna_metadata  # noqa: E402
@@ -262,15 +263,36 @@ if run(EXP + ["cache-warm-multi", *COMMON, "--config", cfg_path, "--variants", f
 EXCLUDED = OUT / "warm" / "excluded_unreadable.json"
 SUMMARY["stage"] = "train"
 work = OUT / "runs" / f"s{SEED}_D"
-if run(EXP + ["train", *COMMON, "--config", cfg_path, "--include-studies", OUT / "selected_studies.json", "--exclude-studies", EXCLUDED, "--work-dir", work], "train_D").returncode != 0:
+
+# ---- resume support after a Kaggle interruption: attach the previous version's output (or a private dataset holding its phase19/runs/s201_D folder) and the trainer continues from last.pt.
+# The trainer itself refuses a checkpoint whose config identity, target columns or dataset fingerprint differ, so a wrong attachment cannot silently change the experiment.
+_prev = os.environ.get("P19_PREV")
+_found = [pathlib.Path(x).parent for x in (find_named_files(pathlib.Path(_prev), "last.pt", max_depth=3) if _prev else find_named_files(INPUT, "last.pt", max_depth=6))]
+_found = [f for f in _found if f.name == f"s{SEED}_D"]
+if len(_found) > 1:
+    SUMMARY["resume_candidates"] = [str(f) for f in _found]
+    stop("more than one previous s201_D checkpoint folder is attached; attach exactly one")
+if _found and not (work / "last.pt").exists():
+    shutil.copytree(_found[0], work, ignore=shutil.ignore_patterns("last_best.pt"))
+    SUMMARY["restored_from_previous_session"] = {"source": str(_found[0]), "last_pt_sha256": sha(work / "last.pt")}
+if run(EXP + ["train", *COMMON, "--config", cfg_path, "--include-studies", OUT / "selected_studies.json", "--exclude-studies", EXCLUDED, "--work-dir", work,
+              "--max-seconds", MAX_SECONDS], "train_D", timeout=MAX_SECONDS + 1800).returncode != 0:
     stop("training failed")
 state = torch.load(work / "last.pt", map_location="cpu", weights_only=True)
+if state["epoch"] < EPOCHS:  # paused by the time budget: no scoring until all epochs are done; resume by attaching this version's output (see docs/phase19_gpu_experiment_plan.md)
+    SUMMARY["stage"] = "paused"
+    SUMMARY["paused"] = {"epoch": state["epoch"], "global_step": state["global_step"], "last_pt_sha256": sha(work / "last.pt"), "update_accounting": analyze_update_log(work)}
+    save()
+    print("PAUSED at epoch", state["epoch"], "- relaunch with this output attached to resume")
+    sys.exit(0)
 rec = {"epochs": state["epoch"], "global_step": state["global_step"], "dataset_fingerprint": state["dataset_fingerprint"], "validation_sha256": sha_ids(state["valid_study_ids"]),
        "last_pt_sha256": sha(work / "last.pt"), "keys_present": {k: state.get(k) is not None for k in ("model", "optimizer", "scheduler", "scaler", "torch_rng", "python_rng", "numpy_rng", "cuda_rng", "loader_rng", "config", "metrics")},
        "peak_cuda_gb": max((json.loads(l).get("cuda_peak_gb") or 0) for l in (work / "runtime_log.jsonl").read_text().splitlines() if '"event": "epoch"' in l),
        "epoch_seconds": [round(json.loads(l)["seconds"], 1) for l in (work / "runtime_log.jsonl").read_text().splitlines() if '"event": "epoch"' in l]}
 if rec["validation_sha256"] != sha_ids(val_ids) and not DRY:  # (a rehearsal on a few local studies trains on a subset)
     stop("the trained run's validation set differs from the registered partition")
+rec["per_epoch"] = [{k: h.get(k) for k in ("epoch", "train_loss", "val_loss", "val_macro_auc_weak", "updates_applied", "updates_skipped", "nonfinite_tensors", "scale_start", "scale_end",
+                                            "grad_norm_mean", "grad_norm_max", "grad_clipped_fraction", "lr")} for h in state["metrics"]["history"]]  # clipping and scaler health, epoch by epoch
 rec["update_accounting"] = analyze_update_log(work)  # scale trajectory, skipped updates, consistency of the global-step accounting
 SUMMARY["run_D"] = rec
 (work / "last_best.pt").unlink(missing_ok=True)

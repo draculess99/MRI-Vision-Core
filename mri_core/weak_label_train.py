@@ -47,7 +47,7 @@ DEFAULT_CONFIG = {
     "planes": ["Axial", "Coronal", "Sagittal"], "num_workers": 2, "val_fraction": 0.1, "max_pos_weight": 10.0,
     "reliability_weights": {}, "amp": False, "device": "auto", "max_invalid_fraction": 0.05, "deterministic": True,
     # optimizer-update accounting: gradients of `grad_accum_steps` batches are summed into ONE update; the update count (not the batch count) is the global step
-    "grad_accum_steps": 1, "amp_init_scale": 65536.0, "amp_min_scale": 1.0, "max_consecutive_skipped_updates": 20,
+    "grad_accum_steps": 1, "amp_init_scale": 65536.0, "amp_min_scale": 1.0, "max_consecutive_skipped_updates": 20, "amp_growth_interval": 2000,
 }
 
 
@@ -282,7 +282,7 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
     amp_dtype = torch.float16 if torch_device.type == "cuda" else torch.bfloat16
     # float16 only on CUDA: T4/P100 have no bf16 units, and emulated bf16 is ~50x slower and can silently change results
     if use_amp and scaler is None:
-        scaler = torch.amp.GradScaler(torch_device.type, init_scale=float(config["amp_init_scale"]))
+        scaler = torch.amp.GradScaler(torch_device.type, init_scale=float(config["amp_init_scale"]), growth_interval=int(config["amp_growth_interval"]))
 
     accum = int(config["grad_accum_steps"])
     if accum < 1:
