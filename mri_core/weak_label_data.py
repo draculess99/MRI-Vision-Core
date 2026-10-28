@@ -68,6 +68,26 @@ def hash_split(ids: Sequence[str], val_fraction: float, seed: int):
     return train, val
 
 
+def stability_split_preflight(ids: Sequence[str], registered_val_ids: Iterable[str], val_fraction: float, seed: int, *, min_train: int = 8, min_val: int = 4) -> dict:
+    """Non-empty partition check for the bounded stability rehearsal, run before any GPU work.
+
+    The rehearsal studies are taken from the registered TRAINING partition, i.e. the studies whose seed hash is >= the registered validation fraction (0.2). Re-splitting them with the
+    same fraction and seed therefore puts every study in train (the Phase 19C v1 failure). A larger fraction turns the hash band [0.2, fraction) of those training studies into an
+    INTERNAL validation set; it never contains a registered validation study. Returns the counts, or raises ValueError."""
+    ids = [str(u) for u in ids]
+    registered = set(map(str, registered_val_ids))
+    if registered & set(ids):
+        raise ValueError(f"{len(registered & set(ids))} stability studies belong to the registered validation partition")
+    try:
+        train, val = hash_split(ids, val_fraction, seed)
+    except ValueError as error:
+        raise ValueError(f"stability split is empty at val_fraction={val_fraction} for {len(ids)} studies: {error}") from error
+    if len(train) < min_train or len(val) < min_val:
+        raise ValueError(f"stability split too small at val_fraction={val_fraction}: {len(train)} train / {len(val)} validation (need >= {min_train} / {min_val})")
+    return {"studies": len(ids), "internal_train": len(train), "internal_validation": len(val), "val_fraction": val_fraction, "seed": seed,
+            "internal_validation_disjoint_from_registered_validation": True}
+
+
 def assert_no_leakage(train_ids: Iterable[str], val_ids: Iterable[str], *, gold_ids: Iterable[str],
                       test_ids: Iterable[str] = ()) -> None:
     train_ids, val_ids = set(map(str, train_ids)), set(map(str, val_ids))

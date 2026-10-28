@@ -28,9 +28,9 @@ TINY = bool(os.environ.get("P19_TINY"))  # CPU rehearsal with a small ConvNeXt
 MODE = os.environ.get("P19_MODE", "full")  # "stability": bounded T4 rehearsal on registered TRAINING studies only (no scoring, no metadata baselines); "full": the experiment
 ACCUM = int(os.environ.get("P19_ACCUM", "2"))  # batch 2 x accumulation 2 = effective 4 per optimizer update
 STABILITY_STUDIES = int(os.environ.get("P19_STABILITY_STUDIES", "48"))
-VAL_FRACTION = float(os.environ.get("P19_VAL_FRACTION", "0.2"))  # only the tiny local CPU rehearsal changes this; the registered partition needs 0.2
-if MODE == "full" and VAL_FRACTION != 0.2:
-    raise SystemExit("the full run must use val_fraction 0.2 (registered partition)")
+# Full run: the registered seed-201 partition needs 0.2 (962 train / 238 validation). Stability run: its studies come from the registered TRAINING partition (hash >= 0.2), so re-splitting
+# with 0.2 leaves no validation study (Phase 19C v1 failure); 0.4 makes the hash band [0.2, 0.4) of those training studies an INTERNAL health-check set.
+VAL_FRACTION = 0.2 if MODE == "full" else 0.4
 if MODE not in ("full", "stability"):
     raise SystemExit("P19_MODE must be full or stability")
 OUT = WORKING / "phase19"
@@ -122,6 +122,7 @@ from kaggle_rsna_runner import device_info, discover_data  # noqa: E402
 from mri_core import weak_label_confound as wc  # noqa: E402
 from mri_core.kaggle_inputs import InputsError, download_verified, locate_inputs_package  # noqa: E402
 from mri_core.weak_label_train import analyze_update_log  # noqa: E402
+from mri_core.weak_label_data import stability_split_preflight  # noqa: E402
 from mri_core.rsna_knee_dataset import TARGET_COLUMNS, load_rsna_metadata  # noqa: E402
 from mri_core.weak_label_data import assert_no_leakage, hash_split, load_weak_manifest  # noqa: E402
 
@@ -211,9 +212,15 @@ if MODE == "stability":
 
     sub = [u for u in train_ids if present(u)][:STABILITY_STUDIES]  # deterministic: registered training order
     assert sub and not set(sub) & (set(val_ids) | set(metadata.complete_label_train["StudyInstanceUID"].astype(str)) | test_ids)
+    try:  # non-empty partition check BEFORE any GPU work; internal validation can never be a registered validation study
+        SUMMARY["stability_partition_preflight"] = stability_split_preflight(sub, val_ids, VAL_FRACTION, SEED, **({"min_train": 1, "min_val": 1} if DRY else {}))  # DRY = tiny local CPU rehearsal
+    except ValueError as error:
+        stop(f"stability partition preflight failed: {error}")
     (OUT / "stability_studies.json").write_text(json.dumps(sub))
     SUMMARY["stability"] = {"studies": len(sub), "all_registered_training": True, "overlap_with_registered_validation_gold_test": 0, "epochs": EPOCHS,
-                            "note": "the trainer re-splits these training studies internally (hash split, seed 201); its validation fraction is training-partition data, so no registered validation study is touched"}
+                            "internal_val_fraction": VAL_FRACTION,
+                            "internal_validation_role": "health check only (loss/AUC on training-partition studies); never used for model selection (no early stopping, last_best.pt discarded) and never reported as benchmark performance",
+                            "note": "the trainer re-splits these training studies internally (hash split, seed 201, fraction 0.4); no registered validation study is touched"}
     work = OUT / "runs" / f"stability_s{SEED}_D"
     base_cmd = EXP + ["train", *COMMON, "--config", cfg_path, "--include-studies", OUT / "stability_studies.json", "--work-dir", work]
     if run(base_cmd + ["--stop-after-epochs", "1"], "stability_part1").returncode != 0:

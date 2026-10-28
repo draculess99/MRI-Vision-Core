@@ -114,5 +114,5 @@ def test_driver_stability_mode_is_training_only_unscored_and_full_mode_keeps_the
     source = SCRIPTS[0].read_text(encoding="utf-8")
     branch = source.split('if MODE == "stability":')[1].split('SUMMARY["stage"] = "cache"')[0]
     assert "set(val_ids)" in branch and "complete_label_train" in branch and "test_ids" in branch and "score-validation" not in branch and "metadata" not in branch.replace("metadata.", "")
-    assert 'if MODE == "full" and VAL_FRACTION != 0.2' in source and '"grad_accum_steps": ACCUM' in source and '"amp_init_scale": 1024.0' in source
+    assert 'VAL_FRACTION = 0.2 if MODE == "full" else 0.4' in source and '"grad_accum_steps": ACCUM' in source and '"amp_init_scale": 1024.0' in source
     assert 'os.environ.get("P19_ACCUM", "2")' in source and 'int(os.environ.get("P19_BATCH", "2"))' in source
