@@ -181,7 +181,7 @@ rec = {"epochs": state["epoch"], "global_step": state["global_step"], "dataset_f
        "last_pt_sha256": sha(work / "last.pt"), "keys_present": {k: state.get(k) is not None for k in ("model", "optimizer", "scheduler", "scaler", "torch_rng", "python_rng", "numpy_rng", "cuda_rng", "loader_rng", "config", "metrics")},
        "peak_cuda_gb": max((json.loads(l).get("cuda_peak_gb") or 0) for l in (work / "runtime_log.jsonl").read_text().splitlines() if '"event": "epoch"' in l),
        "epoch_seconds": [round(json.loads(l)["seconds"], 1) for l in (work / "runtime_log.jsonl").read_text().splitlines() if '"event": "epoch"' in l]}
-if rec["validation_sha256"] != sha_ids(val_ids):
+if rec["validation_sha256"] != sha_ids(val_ids) and not DRY:  # (a rehearsal on a few local studies trains on a subset)
     stop("the trained run's validation set differs from the registered partition")
 SUMMARY["run_D"] = rec
 (work / "last_best.pt").unlink(missing_ok=True)
