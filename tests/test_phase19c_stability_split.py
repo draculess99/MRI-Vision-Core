@@ -63,6 +63,6 @@ def test_the_actual_48_stability_studies_give_30_internal_training_and_18_intern
 def test_driver_keeps_the_registered_full_partition_and_runs_the_preflight_before_the_gpu_step():
     source = (ROOT / "scripts" / "kaggle_phase19_driver.py").read_text(encoding="utf-8")
     assert 'VAL_FRACTION = 0.2 if MODE == "full" else 0.4' in source and "P19_VAL_FRACTION" not in source
-    assert source.index("stability_split_preflight(sub, val_ids, VAL_FRACTION, SEED)") < source.index('"stability_part1"')
+    assert source.index("stability_split_preflight(sub, val_ids, VAL_FRACTION, SEED,") < source.index('"stability_part1"')
     assert '"val_fraction": VAL_FRACTION' in source and '"early_stopping_patience": 0' in source  # no model selection on the internal split
     assert "never reported as benchmark performance" in source and "last_best.pt" in source
