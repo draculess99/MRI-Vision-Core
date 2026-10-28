@@ -1,6 +1,7 @@
 """ConvNeXt-T plain and ROI-box-pooling models: architecture, masking, ROI semantics, provenance guards and pipeline integration (CPU, tiny configs)."""
 
 import json
+import pathlib
 
 import numpy as np
 import pytest
@@ -57,6 +58,41 @@ def test_local_pretrained_weights_load_and_mismatches_are_refused(tmp_path):
     torch.save({k: v for k, v in state.items() if not k.startswith("features.7")}, tmp_path / "bad.pt")
     with pytest.raises(ValueError, match="does not match"):
         load_trunk_weights(ConvNeXtTrunk(depths=(1, 1, 1, 1), dims=(8, 16, 32, 64)), tmp_path / "bad.pt")
+
+
+def _states_differ(a, b):
+    return any(not torch.equal(a[k], b[k]) for k in a)
+
+
+def test_pretrained_loading_replaces_only_the_trunk_and_leaves_task_heads_at_their_seeded_fresh_init(tmp_path):
+    donor = ConvNeXtTrunk(depths=(1, 1, 1, 1), dims=(8, 16, 32, 64))
+    torch.manual_seed(123)
+    for p in donor.parameters():
+        p.data = torch.randn_like(p)
+    state = {("classifier.0." + k[len("out_norm."):] if k.startswith("out_norm.") else k): v for k, v in donor.state_dict().items()}
+    path = tmp_path / "w.pt"
+    torch.save(state, path)
+    fresh, loaded = model(), model(pretrained_weights=str(path))  # model() reseeds, so the heads draw identical random numbers
+    assert all(torch.equal(v, loaded.trunk.state_dict()[k]) for k, v in donor.state_dict().items())  # trunk == file
+    assert _states_differ({k: v for k, v in fresh.state_dict().items() if k.startswith("trunk.")}, {k: v for k, v in loaded.state_dict().items() if k.startswith("trunk.")})
+    head_keys = [k for k in fresh.state_dict() if not k.startswith("trunk.")]
+    assert head_keys and all(torch.equal(fresh.state_dict()[k], loaded.state_dict()[k]) for k in head_keys)  # plane embeddings, attention, per-target heads untouched
+    assert not any("classifier.2" in k for k in loaded.state_dict())  # the 1000-class ImageNet head is not carried over
+    assert all(p.requires_grad for p in loaded.parameters())  # nothing frozen by loading
+
+
+REAL_WEIGHTS = pathlib.Path(__file__).resolve().parents[1] / "outputs" / "pretrained" / "convnext_tiny-983f1562.pth"
+
+
+@pytest.mark.skipif(not REAL_WEIGHTS.is_file(), reason="official torchvision weights not present locally")
+def test_official_torchvision_convnext_tiny_weights_fit_the_trunk_exactly_and_hash_matches():
+    import hashlib
+    assert hashlib.sha256(REAL_WEIGHTS.read_bytes()).hexdigest() == "983f1562536e84ff750a1576fb08e54de751dbf2e17c0d8a4a13704341fdcd3d"
+    trunk = ConvNeXtTrunk(drop_path=0.0)
+    assert load_trunk_weights(trunk, REAL_WEIGHTS)["loaded_tensors"] == 180
+    file_state = torch.load(REAL_WEIGHTS, map_location="cpu", weights_only=True)
+    assert all(torch.equal(trunk.state_dict()[k.replace("classifier.0.", "out_norm.")], v) for k, v in file_state.items() if not k.startswith("classifier.2"))
+    assert set(k for k in file_state if k.startswith("classifier.2")) == {"classifier.2.weight", "classifier.2.bias"}  # the only ignored tensors
 
 
 def test_forward_shapes_and_padded_slices_do_not_influence_the_output():

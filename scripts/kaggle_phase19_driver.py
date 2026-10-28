@@ -2,8 +2,8 @@
 
 Same manifest (v0.1.0, original B0 labels), same 1,200-study pool and seed-201 validation partition as Phase 17A, so the output can be compared paired with the preserved
 Phase 17A B0/C1 predictions and the metadata baselines locally (scripts/analyze_phase19.py). The ROI arm (E) is NOT run here: it needs independent ROI boxes that do not exist
-(see docs/phase19_convnext_reproduction.md); the driver only records that. Reference labels are the weak labels: descriptive only, no claim. No pretrained weights unless a LOCAL
-weights file is attached with PROVENANCE kind phase19_weights (none exists; random initialisation is the default and the stated limitation).
+(see docs/phase19_convnext_reproduction.md); the driver only records that. Reference labels are the weak labels: descriptive only, no claim. Pretrained weights: the hash-pinned torchvision
+ConvNeXt-T file from a private dataset with PROVENANCE kind phase19_weights is REQUIRED (random init only with P19_RANDOM_INIT=1).
 """
 
 import glob
@@ -129,6 +129,20 @@ try:
 except InputsError as error:
     SUMMARY["inputs_diagnosis"] = {"code": error.code, **error.diagnostics}
     stop(f"inputs package problem ({error.code}): {error}")
+EXPECTED_WEIGHTS_SHA256 = "983f1562536e84ff750a1576fb08e54de751dbf2e17c0d8a4a13704341fdcd3d"  # torchvision convnext_tiny IMAGENET1K_V1
+WEIGHTS = None
+if os.environ.get("P19_RANDOM_INIT") != "1" and not TINY:  # random initialisation only by explicit request
+    try:
+        WDIR, WPROV = locate_inputs_package(INPUT, "phase19_weights", override=os.environ.get("P19_WEIGHTS"))
+    except InputsError as error:
+        SUMMARY["weights_diagnosis"] = {"code": error.code, **error.diagnostics}
+        stop(f"pretrained weights package problem ({error.code}): {error}")
+    WEIGHTS = WDIR / "convnext_tiny-983f1562.pth"
+    if sha(WEIGHTS) != EXPECTED_WEIGHTS_SHA256:
+        stop("the weights file is not the expected torchvision convnext_tiny IMAGENET1K_V1 file")
+    SUMMARY["weights"] = {"sha256": EXPECTED_WEIGHTS_SHA256, "source": WPROV.get("source_url"), "license_note": WPROV.get("license_note")}
+else:
+    SUMMARY["weights"] = {"random_init": True}
 selection = json.loads((IN / "selected_studies.json").read_text())
 if sha_ids(selection) != REG["training_pool"]["sha256"] and not DRY:
     stop("selection differs from the registered training pool")
@@ -157,8 +171,10 @@ SUMMARY["partition"] = {"train": len(train_ids), "validation": len(val_ids), "va
 base = json.loads((code / "configs" / "weak_label_full_tier1.json").read_text())
 cfg = {**base, "arm": "D", "amp": True, "val_fraction": 0.2, "seed": SEED, "batch_size": BATCH, "epochs": EPOCHS, "early_stopping_patience": 0, "learning_rate": 1e-4,
        "weight_decay": 0.05, "grad_clip": 1.0, "num_workers": min(4, os.cpu_count() or 2), "cache_dir": str(CACHE), "image_size": IMAGE_SIZE, "slices_per_series": 9,
-       "reliability_weights": {"ACL": 1.0, "Medial Meniscus": 1.0, "Lateral Meniscus": 0.0}, "drop_path": 0.1, "pretrained_weights": None}
+       "reliability_weights": {"ACL": 1.0, "Medial Meniscus": 1.0, "Lateral Meniscus": 0.0}, "drop_path": 0.1, "pretrained_weights": None if WEIGHTS is None else str(WEIGHTS)}
 if TINY:
+    cfg["pretrained_weights"] = None  # the tiny rehearsal model cannot take the real weights
+    SUMMARY["weights"] = {"random_init": True, "reason": "tiny CPU rehearsal"}
     cfg.update({"convnext_depths": [1, 1, 1, 1], "convnext_dims": [8, 16, 32, 64]})
 (OUT / "configs").mkdir(exist_ok=True)
 cfg_path = OUT / "configs" / "arm_D.json"

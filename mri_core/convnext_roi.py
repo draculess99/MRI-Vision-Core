@@ -169,7 +169,7 @@ class ConvNeXtMIL(nn.Module):
         x = images[mask][:, :1]  # valid slices only [N, 1, H, W]
         x = ((x - MEAN) / STD).expand(-1, 3, -1, -1)
         fmap = self.trunk(x)  # [N, F, h, w]
-        pooled = self.trunk.out_norm(fmap).mean(dim=(2, 3))  # [N, F]
+        pooled = self.trunk.out_norm(fmap.mean(dim=(2, 3), keepdim=True)).flatten(1)  # [N, F]; pool then norm, as in the ImageNet head the weights were trained with
         shared = pooled.new_zeros(b, p, s, pooled.shape[-1])
         shared[mask] = pooled
         shared = self.norm(shared + self.plane_embedding[None, :, None, :])
@@ -197,7 +197,7 @@ class ConvNeXtMIL(nn.Module):
                 cells = box_pool_grid(fmap, box, self.grid)  # [N, F, g, g]
                 scores = box_pool_grid(score_maps[:, k:k + 1], box, self.grid).flatten(1)  # [N, g*g]
                 weights = scores.softmax(dim=1).view(n_valid, 1, self.grid, self.grid)
-                emb = self.trunk.out_norm(cells).mul(weights).sum(dim=(2, 3))  # in-box attention pooling [N, F]
+                emb = self.trunk.out_norm(cells.mul(weights).sum(dim=(2, 3), keepdim=True)).flatten(1)  # in-box attention pooling, then the same norm [N, F]
                 roi_embed[bi, pi, si, k] = emb
                 roi_ok[bi, pi, si, k] = (position >= box[:, 4]) & (position <= box[:, 5])
             roi_embed = self.norm(roi_embed + self.plane_embedding[None, :, None, None, :])
