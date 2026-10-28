@@ -28,6 +28,9 @@ TINY = bool(os.environ.get("P19_TINY"))  # CPU rehearsal with a small ConvNeXt
 MODE = os.environ.get("P19_MODE", "full")  # "stability": bounded T4 rehearsal on registered TRAINING studies only (no scoring, no metadata baselines); "full": the experiment
 ACCUM = int(os.environ.get("P19_ACCUM", "2"))  # batch 2 x accumulation 2 = effective 4 per optimizer update
 STABILITY_STUDIES = int(os.environ.get("P19_STABILITY_STUDIES", "48"))
+VAL_FRACTION = float(os.environ.get("P19_VAL_FRACTION", "0.2"))  # only the tiny local CPU rehearsal changes this; the registered partition needs 0.2
+if MODE == "full" and VAL_FRACTION != 0.2:
+    raise SystemExit("the full run must use val_fraction 0.2 (registered partition)")
 if MODE not in ("full", "stability"):
     raise SystemExit("P19_MODE must be full or stability")
 OUT = WORKING / "phase19"
@@ -181,7 +184,7 @@ SUMMARY["partition"] = {"train": len(train_ids), "validation": len(val_ids), "va
 (OUT / "selected_studies.json").write_text(json.dumps(selection))
 
 base = json.loads((code / "configs" / "weak_label_full_tier1.json").read_text())
-cfg = {**base, "arm": "D", "amp": True, "val_fraction": 0.2, "seed": SEED, "batch_size": BATCH, "epochs": EPOCHS, "early_stopping_patience": 0, "learning_rate": 1e-4,
+cfg = {**base, "arm": "D", "amp": True, "val_fraction": VAL_FRACTION, "seed": SEED, "batch_size": BATCH, "epochs": EPOCHS, "early_stopping_patience": 0, "learning_rate": 1e-4,
        "weight_decay": 0.05, "grad_clip": 1.0, "num_workers": min(4, os.cpu_count() or 2), "cache_dir": str(CACHE), "image_size": IMAGE_SIZE, "slices_per_series": 9,
        "reliability_weights": {"ACL": 1.0, "Medial Meniscus": 1.0, "Lateral Meniscus": 0.0}, "drop_path": 0.1, "pretrained_weights": None if WEIGHTS is None else str(WEIGHTS),
        # update accounting: batch 2 x accumulation = one optimizer update; global step = updates; a safer initial fp16 scale (default 65536 overflowed the first updates in the Phase 19B smoke)
@@ -202,7 +205,11 @@ if MODE == "stability":
     # Bounded T4 stability rehearsal: a fixed subset of REGISTERED TRAINING studies (never the registered validation studies, gold or test), the real trainer, real original weak labels,
     # pretrained trunk, AMP, batch 2 x accumulation 2. The run is cut after epoch 1 and resumed, so checkpoint recovery is exercised on the GPU. No scoring, no baselines, no claim.
     SUMMARY["stage"] = "stability"
-    sub = [u for u in train_ids if u in set(order)][:STABILITY_STUDIES]  # deterministic: registered training order
+    def present(uid):  # all series on disk (always true on Kaggle; lets the CPU rehearsal pick the few local studies)
+        rows = metadata.series_for(uid)
+        return len(rows) > 0 and all(metadata.dicom_series_dir(uid, str(x)).is_dir() for x in rows["SeriesInstanceUID"])
+
+    sub = [u for u in train_ids if present(u)][:STABILITY_STUDIES]  # deterministic: registered training order
     assert sub and not set(sub) & (set(val_ids) | set(metadata.complete_label_train["StudyInstanceUID"].astype(str)) | test_ids)
     (OUT / "stability_studies.json").write_text(json.dumps(sub))
     SUMMARY["stability"] = {"studies": len(sub), "all_registered_training": True, "overlap_with_registered_validation_gold_test": 0, "epochs": EPOCHS,
@@ -233,7 +240,7 @@ if MODE == "stability":
         "per_epoch": [{k: h.get(k) for k in ("epoch", "train_loss", "updates_applied", "updates_skipped", "nonfinite_tensors", "scale_start", "scale_end", "grad_norm_mean", "grad_norm_max", "val_loss", "lr")} for h in history],
         "peak_cuda_gb": max((r.get("cuda_peak_gb") or 0) for r in epochs), "epoch_seconds": [round(r["seconds"], 1) for r in epochs],
         "train_losses_finite": all(h["train_loss"] == h["train_loss"] and abs(h["train_loss"]) < 1e6 for h in history),
-        "verdict": {"stable": bool(final["stable"] and ck2["epoch"] == EPOCHS), "skipped_updates": final["skipped"], "skips_after_calibration": final["skips_after_calibration"],
+        "verdict": {"stable": bool(final["stable"] and ck2["epoch"] == EPOCHS and (DRY or (ck2.get("scaler") is not None and final["scale_min"] is not None))), "skipped_updates": final["skipped"], "skips_after_calibration": final["skips_after_calibration"],
                     "scale_min": final["scale_min"], "consistent_accounting": final["consistent"]}})
     (work / "last_best.pt").unlink(missing_ok=True)
     SUMMARY["stage"] = "done"

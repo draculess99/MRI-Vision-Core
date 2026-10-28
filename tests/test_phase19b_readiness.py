@@ -97,3 +97,22 @@ def test_download_verified_accepts_only_matching_bytes_over_https_and_fails_clos
     with pytest.raises(InputsError):
         download_verified("https://example.org/w.pth", dest, good, opener=lambda u: _Resp(b"other"))
     assert not dest.exists()
+
+
+def test_stability_kernel_is_the_driver_in_stability_mode_and_is_private_gpu_with_no_extra_datasets():
+    d = ROOT / "outputs" / "kaggle_smoke" / "p19c_stability_DO_NOT_PUSH_without_approval"
+    if not d.is_dir():
+        pytest.skip("local kernel folder not built")
+    body = (d / "kaggle_phase19c_stability.py").read_text(encoding="utf-8")
+    assert body.endswith(SCRIPTS[0].read_text(encoding="utf-8")) and body.startswith("import os as _os") and '"P19_MODE"] = "stability"' in body.split("\n")[1]
+    m = json.loads((d / "kernel-metadata.json").read_text())
+    assert m["is_private"] and m["enable_gpu"] and m["enable_internet"] is True and m["id"] == "draculess/rsna-phase19c-stability"
+    assert m["dataset_sources"] == ["draculess/rsna-weak-label-code", "draculess/rsna-weak-label-phase17a-inputs"] and m["competition_sources"] == ["rsna-knee-abnormality-detection"]
+
+
+def test_driver_stability_mode_is_training_only_unscored_and_full_mode_keeps_the_registered_partition():
+    source = SCRIPTS[0].read_text(encoding="utf-8")
+    branch = source.split('if MODE == "stability":')[1].split('SUMMARY["stage"] = "cache"')[0]
+    assert "set(val_ids)" in branch and "complete_label_train" in branch and "test_ids" in branch and "score-validation" not in branch and "metadata" not in branch.replace("metadata.", "")
+    assert 'if MODE == "full" and VAL_FRACTION != 0.2' in source and '"grad_accum_steps": ACCUM' in source and '"amp_init_scale": 1024.0' in source
+    assert 'os.environ.get("P19_ACCUM", "2")' in source and 'int(os.environ.get("P19_BATCH", "2"))' in source
