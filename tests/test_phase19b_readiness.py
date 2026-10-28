@@ -19,9 +19,10 @@ def test_scripts_parse_and_pin_the_weights_hash(path):
     assert "kaggle competitions submit" not in source and "submit" not in re.findall(r"subprocess\.run\(\[[^\]]*", source)
 
 
-def test_driver_defaults_to_pretrained_and_only_an_explicit_switch_allows_random_init():
+def test_driver_defaults_to_the_verified_official_download_and_random_init_needs_an_explicit_full_mode_switch():
     source = SCRIPTS[0].read_text(encoding="utf-8")
-    assert 'os.environ.get("P19_RANDOM_INIT") != "1"' in source
+    assert 'os.environ.get("P19_RANDOM_INIT") == "1" and MODE == "full"' in source
+    assert "download_verified(WEIGHTS_URL, WEIGHTS, EXPECTED_WEIGHTS_SHA256" in source and "no random-initialisation fallback" in source and "phase19_weights" not in source
     assert '"pretrained_weights": None if WEIGHTS is None else str(WEIGHTS)' in source
 
 

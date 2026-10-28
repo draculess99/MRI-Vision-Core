@@ -38,6 +38,7 @@ INVALID_LOG = "invalid_studies.json"
 AMP_DEVICE_TYPES = ("cuda",)  # tests may add "cpu" to exercise the scaler path without a GPU
 LAST = "last.pt"
 RUNTIME_LOG = "runtime_log.jsonl"
+UPDATE_LOG = "update_log.jsonl"
 IDENTITY_KEYS = ("arm", "seed", "learning_rate", "weight_decay", "batch_size", "image_size", "slices_per_series",
                  "planes", "dropout", "val_fraction", "reliability_weights", "max_pos_weight", "warmup_epochs", "amp")
 DEFAULT_CONFIG = {
@@ -45,6 +46,8 @@ DEFAULT_CONFIG = {
     "warmup_epochs": 1, "grad_clip": 1.0, "early_stopping_patience": 0, "early_stopping_min_delta": 0.002, "dropout": 0.2, "image_size": 128, "slices_per_series": 9,
     "planes": ["Axial", "Coronal", "Sagittal"], "num_workers": 2, "val_fraction": 0.1, "max_pos_weight": 10.0,
     "reliability_weights": {}, "amp": False, "device": "auto", "max_invalid_fraction": 0.05, "deterministic": True,
+    # optimizer-update accounting: gradients of `grad_accum_steps` batches are summed into ONE update; the update count (not the batch count) is the global step
+    "grad_accum_steps": 1, "amp_init_scale": 65536.0, "amp_min_scale": 1.0, "max_consecutive_skipped_updates": 20,
 }
 
 
@@ -159,6 +162,41 @@ def _scheduler(optimizer, config: dict):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
 
 
+def _write_update_rows(path: Path, rows: Sequence[dict]) -> None:
+    with open(path, "a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, default=float) + "\n")
+
+
+def _trim_update_log(path: Path, keep_epochs: int) -> None:
+    """After a resume, keep only the update rows of epochs whose checkpoint exists."""
+    if not path.is_file():
+        return
+    kept = [line for line in path.read_text(encoding="utf-8").splitlines() if json.loads(line)["epoch"] <= keep_epochs]
+    path.write_text("".join(line + "\n" for line in kept), encoding="utf-8")
+
+
+def analyze_update_log(out_dir: Path, *, calibration_updates: int = 20, max_skipped: int = 10) -> dict:
+    """Summarise update_log.jsonl: counts, scale trajectory, skips after start-up calibration and internal consistency. Descriptive; nothing here feeds back into training."""
+    path = Path(out_dir) / UPDATE_LOG
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.is_file() else []
+    if not rows:
+        return {"updates": 0, "stable": False, "reason": "no update rows"}
+    applied = sum(1 for r in rows if r["finite"])
+    skipped_at = [r["update"] for r in rows if r["skipped"]]
+    scales = [r["scale_after"] for r in rows if r["scale_after"] is not None]
+    changes = [(r["update"], r["scale_before"], r["scale_after"]) for r in rows if r["scale_before"] != r["scale_after"]]
+    norms = sorted(r["grad_norm"] for r in rows if r["grad_norm"] is not None)
+    consistent = ([r["update"] for r in rows] == list(range(1, len(rows) + 1)) and applied + len(skipped_at) == len(rows)
+                  and all(a["epoch"] <= b["epoch"] for a, b in zip(rows, rows[1:])) and rows[-1]["applied_total"] == applied)
+    late = [u for u in skipped_at if u > calibration_updates]
+    return {"updates": len(rows), "applied": applied, "skipped": len(skipped_at), "skipped_updates": skipped_at[:30], "skips_after_calibration": len(late),
+            "scale_first": rows[0]["scale_before"], "scale_last": scales[-1] if scales else None, "scale_min": min(scales) if scales else None, "scale_max": max(scales) if scales else None,
+            "scale_changes": changes[:40], "grad_norm_median": norms[len(norms) // 2] if norms else None, "grad_norm_max": norms[-1] if norms else None,
+            "epochs": sorted({r["epoch"] for r in rows}), "consistent": consistent,
+            "stable": bool(consistent and len(skipped_at) <= max_skipped and not late and (min(scales) >= 1.0 if scales else True))}
+
+
 def _log(out_dir: Path, record: dict) -> None:
     with open(out_dir / RUNTIME_LOG, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, default=float) + "\n")
@@ -194,7 +232,7 @@ def _durable_copy(out_dir: Path, export_dir: Optional[Path]) -> None:
         return
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
-    for name in (LAST, "last_best.pt", RUNTIME_LOG):
+    for name in (LAST, "last_best.pt", RUNTIME_LOG, UPDATE_LOG):
         source = out_dir / name
         if source.is_file():
             temp = export_dir / f".{name}.tmp"
@@ -204,6 +242,8 @@ def _durable_copy(out_dir: Path, export_dir: Optional[Path]) -> None:
 
 def _check_compatible(saved: dict, current: dict) -> None:
     diffs = [k for k in IDENTITY_KEYS if saved.get(k) != current.get(k)]
+    if int(saved.get("grad_accum_steps", 1)) != int(current.get("grad_accum_steps", 1)):  # not in IDENTITY_KEYS so that older checkpoints stay valid
+        diffs.append("grad_accum_steps")
     if diffs:
         raise CheckpointIncompatibleError(f"Config changed since the checkpoint was written: {diffs}")
 
@@ -242,9 +282,13 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
     amp_dtype = torch.float16 if torch_device.type == "cuda" else torch.bfloat16
     # float16 only on CUDA: T4/P100 have no bf16 units, and emulated bf16 is ~50x slower and can silently change results
     if use_amp and scaler is None:
-        scaler = torch.amp.GradScaler(torch_device.type)
+        scaler = torch.amp.GradScaler(torch_device.type, init_scale=float(config["amp_init_scale"]))
 
+    accum = int(config["grad_accum_steps"])
+    if accum < 1:
+        raise ValueError("grad_accum_steps must be >= 1")
     start_epoch, step, best, history, resumed_from = 0, 0, None, [], None
+    counters = {"updates_applied": 0, "updates_skipped": 0, "nonfinite_tensors": 0}
     last = out_dir / LAST
     if resume and last.is_file():
         peek = torch.load(last, map_location="cpu", weights_only=True)
@@ -257,10 +301,13 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
                                 device=torch_device)
         start_epoch, step, best = state.epoch, state.global_step, state.best_metric
         history = list(state.metrics.get("history", []))
+        counters = {**counters, **state.metrics.get("counters", {})}
+        _trim_update_log(out_dir / UPDATE_LOG, state.epoch)  # drop rows of an epoch that was lost with its checkpoint
         if state.loader_rng_state is not None:
             generator.set_state(state.loader_rng_state)
         resumed_from = state.epoch
 
+    consecutive_skips = 0
     session = _session_number(out_dir)
     _log(out_dir, {"event": "session_start", "session": session, "device": str(torch_device),
                    "gpus": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())],
@@ -284,43 +331,71 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
         if torch_device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
         model.train()
-        losses, grad_norms, nonfinite_grads = [], [], 0
+        losses, grad_norms, epoch_rows = [], [], []
+        epoch_skipped, epoch_applied, epoch_bad_tensors = 0, 0, 0
+        n_batches = len(loader)
+        scale_start = scaler.get_scale() if scaler is not None and use_amp else None
         data_wait, epoch_images, wait_from = 0.0, 0, time.perf_counter()
-        for batch in loader:
+        optimizer.zero_grad(set_to_none=True)
+        for i, batch in enumerate(loader):
             data_wait += time.perf_counter() - wait_from  # time the GPU loop spent waiting for decoded batches
             if batch_hook is not None:
                 batch_hook(epoch, step)
-            optimizer.zero_grad(set_to_none=True)
+            group = min(accum, n_batches - (i // accum) * accum)  # batches summed into this update (the last group of an epoch may be smaller)
             with torch.autocast(device_type=torch_device.type, dtype=amp_dtype, enabled=use_amp):
                 logits = model(batch["images"].to(torch_device), batch["mask"].to(torch_device), **_roi_inputs(batch, torch_device))
             loss = masked_bce(logits, batch["labels"].to(torch_device), batch["target_mask"].to(torch_device),
                               pos_weight, reliability)
-            if scaler is not None and use_amp:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                norm = nn.utils.clip_grad_norm_(model.parameters(), float(config["grad_clip"]))
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                norm = nn.utils.clip_grad_norm_(model.parameters(), float(config["grad_clip"]))
-                optimizer.step()
             loss_value = float(loss.detach().cpu())
             if not math.isfinite(loss_value):
-                raise TrainingAborted(f"non-finite training loss at global step {step + 1}; stopping before a bad checkpoint is written")
+                raise TrainingAborted(f"non-finite training loss at update {step + 1}; stopping before a bad checkpoint is written")
+            scaled = loss / group
+            (scaler.scale(scaled) if scaler is not None and use_amp else scaled).backward()
             losses.append(loss_value)
-            norm_value = float(norm)  # pre-clip global gradient norm (after unscaling under AMP)
-            if math.isfinite(norm_value):
-                grad_norms.append(norm_value)
-            else:
-                nonfinite_grads += 1  # AMP overflow step: the scaler skips the update
             epoch_images += int(batch["mask"][batch["valid"]].sum())
             seen += len(batch["valid"])
             bad = ~batch["valid"]
             invalid += int(bad.sum())
             invalid_ids.update(u for u, b in zip(batch["study_uid"], bad.tolist()) if b)
-            step += 1
             wait_from = time.perf_counter()
+            if (i + 1) % accum and i + 1 != n_batches:
+                continue  # keep accumulating
+            # ---- one optimizer update. Non-finite gradients never reach optimizer.step(): the update is skipped, weights and Adam moments stay untouched.
+            amp_on = scaler is not None and use_amp
+            scale_before = scaler.get_scale() if amp_on else None
+            if amp_on:
+                scaler.unscale_(optimizer)
+            norm_value = float(nn.utils.clip_grad_norm_(model.parameters(), float(config["grad_clip"])))  # pre-clip global norm (after unscaling under AMP)
+            finite = math.isfinite(norm_value)
+            bad_tensors = 0 if finite else sum(int(not torch.isfinite(p.grad).all()) for p in model.parameters() if p.grad is not None)
+            if finite:
+                if amp_on:
+                    scaler.step(optimizer)
+                else:
+                    optimizer.step()
+                counters["updates_applied"] += 1
+                epoch_applied += 1
+                grad_norms.append(norm_value)
+                consecutive_skips = 0
+            else:
+                counters["updates_skipped"] += 1
+                counters["nonfinite_tensors"] += bad_tensors
+                epoch_skipped += 1
+                epoch_bad_tensors += bad_tensors
+                consecutive_skips += 1
+            if amp_on:
+                scaler.update()  # an overflow lowers the scale; clean updates eventually raise it
+            scale_after = scaler.get_scale() if amp_on else None
+            optimizer.zero_grad(set_to_none=True)
+            step += 1
+            epoch_rows.append({"epoch": epoch + 1, "update": step, "micro_batches": group, "scale_before": scale_before, "scale_after": scale_after,
+                               "grad_norm": norm_value if finite else None, "finite": finite, "skipped": not finite, "nonfinite_tensors": bad_tensors,
+                               "applied_total": counters["updates_applied"], "skipped_total": counters["updates_skipped"],
+                               "lr": float(optimizer.param_groups[0]["lr"]), "train_loss": loss_value})
+            if consecutive_skips >= int(config["max_consecutive_skipped_updates"]):
+                raise TrainingAborted(f"{consecutive_skips} consecutive optimizer updates were skipped for non-finite gradients (update {step}); training is unstable")
+            if amp_on and scale_after < float(config["amp_min_scale"]):
+                raise TrainingAborted(f"GradScaler scale fell to {scale_after} (< {config['amp_min_scale']}) at update {step}; persistent overflow, not start-up calibration")
         scheduler.step()
         if invalid_ids:  # attribution: which studies were skipped (full UIDs stay in the work dir, not in printed logs)
             invalid_path.write_text(json.dumps(sorted(invalid_ids)), encoding="utf-8")
@@ -350,7 +425,9 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
             "grad_norm_mean": float(np.mean(grad_norms)) if grad_norms else None,
             "grad_norm_max": float(np.max(grad_norms)) if grad_norms else None,
             "grad_clipped_fraction": float(np.mean(np.asarray(grad_norms) > grad_clip)) if grad_norms else None,
-            "nonfinite_grad_steps": nonfinite_grads,
+            "nonfinite_grad_steps": epoch_skipped, "updates_applied": epoch_applied, "updates_skipped": epoch_skipped, "nonfinite_tensors": epoch_bad_tensors,
+            "optimizer_updates_total": counters["updates_applied"], "global_step_updates": step, "scale_start": scale_start,
+            "scale_end": scaler.get_scale() if scaler is not None and use_amp else None, "grad_accum_steps": accum,
             "val_prob_mean": {t: float(probs_all[mask_all[:, j] == 1, j].mean()) for j, t in enumerate(TARGET_COLUMNS) if (mask_all[:, j] == 1).any()},
             "val_prob_std": {t: float(probs_all[mask_all[:, j] == 1, j].std()) for j, t in enumerate(TARGET_COLUMNS) if (mask_all[:, j] == 1).any()}}
         record = {"epoch": epoch + 1, "train_loss": float(np.mean(losses)), **diagnostics, "val_loss": val_loss,
@@ -364,8 +441,9 @@ def train_weak_label(train_ds, val_ds, config: dict, out_dir: Path, *, fingerpri
         save_checkpoint(last, model=model, optimizer=optimizer, config=config, target_columns=TARGET_COLUMNS,
                         epoch=epoch + 1, global_step=step, train_study_ids=list(train_ids),
                         valid_study_ids=list(val_ids), dataset_fingerprint=fingerprint,
-                        metrics={"history": history, "latest": record}, best_metric=best, is_best=is_best,
+                        metrics={"history": history, "latest": record, "counters": dict(counters)}, best_metric=best, is_best=is_best,
                         scheduler=scheduler, scaler=scaler if use_amp else None, loader_generator=generator)
+        _write_update_rows(out_dir / UPDATE_LOG, epoch_rows)
         _durable_copy(out_dir, export_dir)
         seconds = time.perf_counter() - epoch_started
         _log(out_dir, {"event": "epoch", "session": session, "epoch": epoch + 1, "seconds": seconds,

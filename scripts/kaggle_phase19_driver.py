@@ -1,9 +1,9 @@
 """Kaggle driver, Phase 19A (PREPARED, NOT LAUNCHED): plain ConvNeXt-T (arm D) on the registered Phase 17 split, ACL + Medial Meniscus only.
 
-Same manifest (v0.1.0, original B0 labels), same 1,200-study pool and seed-201 validation partition as Phase 17A, so the output can be compared paired with the preserved
-Phase 17A B0/C1 predictions and the metadata baselines locally (scripts/analyze_phase19.py). The ROI arm (E) is NOT run here: it needs independent ROI boxes that do not exist
-(see docs/phase19_convnext_reproduction.md); the driver only records that. Reference labels are the weak labels: descriptive only, no claim. Pretrained weights: the hash-pinned torchvision
-ConvNeXt-T file from a private dataset with PROVENANCE kind phase19_weights is REQUIRED (random init only with P19_RANDOM_INIT=1).
+Same manifest (v0.1.0, original B0 labels), same 1,200-study pool and seed-201 validation partition as Phase 17A, so the output can be compared paired with the preserved Phase 17A B0/C1 predictions and metadata baselines.
+The ROI arm (E) is NOT run here: it needs independent ROI boxes that do not exist (see docs/phase19_convnext_reproduction.md). Reference labels are the weak labels: descriptive only, no claim.
+Phase 19C: pretrained trunk = the torchvision ConvNeXt-T file downloaded from the official URL (HTTPS, bounded, full SHA-256, fail closed; no weights dataset). Random init only with P19_RANDOM_INIT=1 in full mode.
+P19_MODE=stability runs a bounded T4 rehearsal on registered TRAINING studies only (batch 2 x accumulation 2, AMP, cut after epoch 1 and resumed; no scoring).
 """
 
 import glob
@@ -21,13 +21,18 @@ WORKING = pathlib.Path(os.environ.get("KAGGLE_WORKING", "/kaggle/working"))
 CACHE = pathlib.Path(os.environ.get("P19_CACHE", "/tmp/decode_cache"))
 DRY = bool(os.environ.get("P19_DRY"))
 SEED = int(os.environ.get("P19_SEED", "201"))
-EPOCHS = int(os.environ.get("P19_EPOCHS", "12"))
+EPOCHS = int(os.environ.get("P19_EPOCHS", "12" if os.environ.get("P19_MODE", "full") == "full" else "3"))
 IMAGE_SIZE = int(os.environ.get("P19_IMAGE_SIZE", "256"))
 BATCH = int(os.environ.get("P19_BATCH", "2"))
 TINY = bool(os.environ.get("P19_TINY"))  # CPU rehearsal with a small ConvNeXt
+MODE = os.environ.get("P19_MODE", "full")  # "stability": bounded T4 rehearsal on registered TRAINING studies only (no scoring, no metadata baselines); "full": the experiment
+ACCUM = int(os.environ.get("P19_ACCUM", "2"))  # batch 2 x accumulation 2 = effective 4 per optimizer update
+STABILITY_STUDIES = int(os.environ.get("P19_STABILITY_STUDIES", "48"))
+if MODE not in ("full", "stability"):
+    raise SystemExit("P19_MODE must be full or stability")
 OUT = WORKING / "phase19"
 OUT.mkdir(parents=True, exist_ok=True)
-SUMMARY = {"experiment": "phase19a_convnext_plain", "weak_label_descriptive_only": True, "claim_allowed": False, "stage": "start", "stopped": None, "seed": SEED,
+SUMMARY = {"experiment": "phase19c_convnext_plain", "mode": MODE, "weak_label_descriptive_only": True, "claim_allowed": False, "stage": "start", "stopped": None, "seed": SEED,
            "roi_arm": {"run": False, "reason": "no independent ROI boxes or detector available (see docs/phase19_convnext_reproduction.md)"}}
 T0 = time.perf_counter()
 
@@ -112,7 +117,8 @@ import pandas as pd  # noqa: E402
 import torch  # noqa: E402
 from kaggle_rsna_runner import device_info, discover_data  # noqa: E402
 from mri_core import weak_label_confound as wc  # noqa: E402
-from mri_core.kaggle_inputs import InputsError, locate_inputs_package  # noqa: E402
+from mri_core.kaggle_inputs import InputsError, download_verified, locate_inputs_package  # noqa: E402
+from mri_core.weak_label_train import analyze_update_log  # noqa: E402
 from mri_core.rsna_knee_dataset import TARGET_COLUMNS, load_rsna_metadata  # noqa: E402
 from mri_core.weak_label_data import assert_no_leakage, hash_split, load_weak_manifest  # noqa: E402
 
@@ -131,18 +137,24 @@ except InputsError as error:
     stop(f"inputs package problem ({error.code}): {error}")
 EXPECTED_WEIGHTS_SHA256 = "983f1562536e84ff750a1576fb08e54de751dbf2e17c0d8a4a13704341fdcd3d"  # torchvision convnext_tiny IMAGENET1K_V1
 WEIGHTS = None
-if os.environ.get("P19_RANDOM_INIT") != "1" and not TINY:  # random initialisation only by explicit request
-    try:
-        WDIR, WPROV = locate_inputs_package(INPUT, "phase19_weights", override=os.environ.get("P19_WEIGHTS"))
-    except InputsError as error:
-        SUMMARY["weights_diagnosis"] = {"code": error.code, **error.diagnostics}
-        stop(f"pretrained weights package problem ({error.code}): {error}")
-    WEIGHTS = WDIR / "convnext_tiny-983f1562.pth"
-    if sha(WEIGHTS) != EXPECTED_WEIGHTS_SHA256:
-        stop("the weights file is not the expected torchvision convnext_tiny IMAGENET1K_V1 file")
-    SUMMARY["weights"] = {"sha256": EXPECTED_WEIGHTS_SHA256, "source": WPROV.get("source_url"), "license_note": WPROV.get("license_note")}
-else:
+WEIGHTS_URL = "https://download.pytorch.org/models/convnext_tiny-983f1562.pth"
+if os.environ.get("P19_RANDOM_INIT") == "1" and MODE == "full":  # random initialisation only by explicit request, never in the stability rehearsal
     SUMMARY["weights"] = {"random_init": True}
+elif not TINY:  # official download, HTTPS, bounded, full SHA-256, fail closed; no random-initialisation fallback
+    WEIGHTS = WORKING / "weights" / "convnext_tiny-983f1562.pth"
+    local = os.environ.get("P19_WEIGHTS_LOCAL_FILE")  # local CPU rehearsal only: an existing file, still hash-verified
+    try:
+        if local:
+            WEIGHTS.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local, WEIGHTS)
+        SUMMARY["weights"] = {"url": WEIGHTS_URL, "sha256": EXPECTED_WEIGHTS_SHA256, "source": "local rehearsal file" if local else "official download",
+                              **download_verified(WEIGHTS_URL, WEIGHTS, EXPECTED_WEIGHTS_SHA256, connect_timeout=30, total_timeout=300),
+                              "license_note": "not stated by torchvision for the weights; research use only; not redistributed by this project"}
+    except InputsError as error:
+        SUMMARY["weights_diagnosis"] = {"code": error.code, "message": str(error)[:300]}
+        stop(f"pretrained weights unavailable ({error.code}); no random-initialisation fallback")
+else:
+    SUMMARY["weights"] = {"random_init": True, "reason": "tiny CPU rehearsal"}
 selection = json.loads((IN / "selected_studies.json").read_text())
 if sha_ids(selection) != REG["training_pool"]["sha256"] and not DRY:
     stop("selection differs from the registered training pool")
@@ -171,7 +183,9 @@ SUMMARY["partition"] = {"train": len(train_ids), "validation": len(val_ids), "va
 base = json.loads((code / "configs" / "weak_label_full_tier1.json").read_text())
 cfg = {**base, "arm": "D", "amp": True, "val_fraction": 0.2, "seed": SEED, "batch_size": BATCH, "epochs": EPOCHS, "early_stopping_patience": 0, "learning_rate": 1e-4,
        "weight_decay": 0.05, "grad_clip": 1.0, "num_workers": min(4, os.cpu_count() or 2), "cache_dir": str(CACHE), "image_size": IMAGE_SIZE, "slices_per_series": 9,
-       "reliability_weights": {"ACL": 1.0, "Medial Meniscus": 1.0, "Lateral Meniscus": 0.0}, "drop_path": 0.1, "pretrained_weights": None if WEIGHTS is None else str(WEIGHTS)}
+       "reliability_weights": {"ACL": 1.0, "Medial Meniscus": 1.0, "Lateral Meniscus": 0.0}, "drop_path": 0.1, "pretrained_weights": None if WEIGHTS is None else str(WEIGHTS),
+       # update accounting: batch 2 x accumulation = one optimizer update; global step = updates; a safer initial fp16 scale (default 65536 overflowed the first updates in the Phase 19B smoke)
+       "grad_accum_steps": ACCUM, "amp_init_scale": 1024.0, "amp_min_scale": 1.0, "max_consecutive_skipped_updates": 20}
 if TINY:
     cfg["pretrained_weights"] = None  # the tiny rehearsal model cannot take the real weights
     SUMMARY["weights"] = {"random_init": True, "reason": "tiny CPU rehearsal"}
@@ -182,6 +196,50 @@ cfg_path.write_text(json.dumps(cfg, indent=2))
 SUMMARY["config"] = cfg
 EXP = [sys.executable, code / "scripts" / "kaggle_weak_label_experiment.py"]
 COMMON = ["--data-dir", meta_dir, "--dicom-root", dicom_root, "--manifest", manifest_path]
+
+
+if MODE == "stability":
+    # Bounded T4 stability rehearsal: a fixed subset of REGISTERED TRAINING studies (never the registered validation studies, gold or test), the real trainer, real original weak labels,
+    # pretrained trunk, AMP, batch 2 x accumulation 2. The run is cut after epoch 1 and resumed, so checkpoint recovery is exercised on the GPU. No scoring, no baselines, no claim.
+    SUMMARY["stage"] = "stability"
+    sub = [u for u in train_ids if u in set(order)][:STABILITY_STUDIES]  # deterministic: registered training order
+    assert sub and not set(sub) & (set(val_ids) | set(metadata.complete_label_train["StudyInstanceUID"].astype(str)) | test_ids)
+    (OUT / "stability_studies.json").write_text(json.dumps(sub))
+    SUMMARY["stability"] = {"studies": len(sub), "all_registered_training": True, "overlap_with_registered_validation_gold_test": 0, "epochs": EPOCHS,
+                            "note": "the trainer re-splits these training studies internally (hash split, seed 201); its validation fraction is training-partition data, so no registered validation study is touched"}
+    work = OUT / "runs" / f"stability_s{SEED}_D"
+    base_cmd = EXP + ["train", *COMMON, "--config", cfg_path, "--include-studies", OUT / "stability_studies.json", "--work-dir", work]
+    if run(base_cmd + ["--stop-after-epochs", "1"], "stability_part1").returncode != 0:
+        stop("stability part 1 failed")
+    part1 = analyze_update_log(work)
+    ck1 = torch.load(work / "last.pt", map_location="cpu", weights_only=True)
+    SUMMARY["stability"]["after_epoch_1"] = {"epoch": ck1["epoch"], "global_step": ck1["global_step"], "scaler_scale": (ck1.get("scaler") or {}).get("scale"), "update_log": part1,
+                                             "counters": ck1["metrics"].get("counters")}
+    save()
+    if run(base_cmd, "stability_part2_resume").returncode != 0:
+        stop("stability resume failed")
+    final = analyze_update_log(work)
+    ck2 = torch.load(work / "last.pt", map_location="cpu", weights_only=True)
+    log = [json.loads(l) for l in (work / "runtime_log.jsonl").read_text().splitlines()]
+    epochs = [r for r in log if r["event"] == "epoch"]
+    resumed = [r for r in log if r["event"] == "session_start"]
+    history = ck2["metrics"]["history"]
+    SUMMARY["stability"].update({
+        "final": {"epoch": ck2["epoch"], "global_step": ck2["global_step"], "scaler_scale": (ck2.get("scaler") or {}).get("scale"), "update_log": final, "counters": ck2["metrics"].get("counters")},
+        "resume": {"second_session_resumed_from_epoch": resumed[-1].get("resumed_from_epoch") if len(resumed) > 1 else None,
+                   "global_step_continued": ck2["global_step"] > ck1["global_step"] and final["updates"] == ck2["global_step"] and final["updates"] > part1["updates"],
+                   "scale_carried_over": history[1]["scale_start"] == history[0]["scale_end"],
+                   "keys_present": {k: ck2.get(k) is not None for k in ("model", "optimizer", "scheduler", "scaler", "torch_rng", "python_rng", "numpy_rng", "cuda_rng", "loader_rng", "config", "metrics")}},
+        "per_epoch": [{k: h.get(k) for k in ("epoch", "train_loss", "updates_applied", "updates_skipped", "nonfinite_tensors", "scale_start", "scale_end", "grad_norm_mean", "grad_norm_max", "val_loss", "lr")} for h in history],
+        "peak_cuda_gb": max((r.get("cuda_peak_gb") or 0) for r in epochs), "epoch_seconds": [round(r["seconds"], 1) for r in epochs],
+        "train_losses_finite": all(h["train_loss"] == h["train_loss"] and abs(h["train_loss"]) < 1e6 for h in history),
+        "verdict": {"stable": bool(final["stable"] and ck2["epoch"] == EPOCHS), "skipped_updates": final["skipped"], "skips_after_calibration": final["skips_after_calibration"],
+                    "scale_min": final["scale_min"], "consistent_accounting": final["consistent"]}})
+    (work / "last_best.pt").unlink(missing_ok=True)
+    SUMMARY["stage"] = "done"
+    save()
+    print(json.dumps({k: SUMMARY["stability"][k] for k in ("final", "resume", "verdict", "peak_cuda_gb", "epoch_seconds")}, indent=1, default=str)[:3500])
+    sys.exit(0)
 
 SUMMARY["stage"] = "cache"
 if run(EXP + ["cache-warm-multi", *COMMON, "--config", cfg_path, "--variants", f"{IMAGE_SIZE}x9", "--include-studies", OUT / "selected_studies.json", "--work-dir", OUT / "warm"],
@@ -199,6 +257,7 @@ rec = {"epochs": state["epoch"], "global_step": state["global_step"], "dataset_f
        "epoch_seconds": [round(json.loads(l)["seconds"], 1) for l in (work / "runtime_log.jsonl").read_text().splitlines() if '"event": "epoch"' in l]}
 if rec["validation_sha256"] != sha_ids(val_ids) and not DRY:  # (a rehearsal on a few local studies trains on a subset)
     stop("the trained run's validation set differs from the registered partition")
+rec["update_accounting"] = analyze_update_log(work)  # scale trajectory, skipped updates, consistency of the global-step accounting
 SUMMARY["run_D"] = rec
 (work / "last_best.pt").unlink(missing_ok=True)
 if run(EXP + ["score-validation", *COMMON, "--config", cfg_path, "--checkpoint", work / "last.pt", "--output", work / "validation_predictions.csv"], "score_D").returncode != 0:
