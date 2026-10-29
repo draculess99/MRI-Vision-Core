@@ -27,7 +27,7 @@ flowchart TD
     B["MRI Core + ChangeGuard"]
     C["Structured Dossier"]
     D["Display Dossier"]
-    E["Click: Generate Brief"]
+    E{Generate<br/>Brief?}
     F{.env<br/>Complete?}
     G["Build Request:<br/>Evidence Only"]
     H["POST to Nebius"]
@@ -35,10 +35,13 @@ flowchart TD
     J{Check<br/>Constraints}
     K["Fallback Brief<br/>(any failure reason)"]
     L["Validated Nebius<br/>Model Brief"]
-    M["Display Brief<br/>+ Dossier Status<br/>Approval Pending"]
-    N["Human Review<br/>Required"]
+    M["Brief Display<br/>+ Dossier Status<br/>Approval Pending"]
+    N["Dossier Available<br/>No Brief Generated"]
+    O["Human Review<br/>Required<br/>(Separate Workflow)"]
 
-    A --> B --> C --> D --> E --> F
+    A --> B --> C --> D --> E
+    E -->|No| N
+    E -->|Yes| F
     F -->|No| K
     F -->|Yes| G --> H --> I
     I -->|No| K
@@ -47,7 +50,8 @@ flowchart TD
     J -->|Pass| L
     K --> M
     L --> M
-    M --> N
+    M --> O
+    N --> O
 ```
 
 ### Walkthrough
