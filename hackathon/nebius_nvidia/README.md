@@ -22,25 +22,32 @@ MRI Evidence Council is a non-diagnostic, evidence-grounded evidence-dossier lay
 ### Data Flow
 
 ```mermaid
-flowchart LR
-    A["Select Synthetic<br/>Scenario"] --> B["MRI Core +<br/>ChangeGuard"]
-    B --> C["Structured<br/>Dossier"]
-    C --> D["Display Dossier<br/>Evidence"]
-    D --> E["Click: Generate<br/>Reviewer Brief"]
-    E --> F{Check .env<br/>Config}
-    F -->|Missing/Invalid| G["Deterministic<br/>Fallback Brief<br/>not_configured"]
-    F -->|Complete| H["Build Request:<br/>Evidence Only<br/>No Images/Approval"]
-    H --> I["POST to Nebius<br/>Token Factory<br/>NVIDIA Nemotron"]
-    I --> J{Validate<br/>Response}
-    J -->|Failed/Invalid| K["Deterministic<br/>Fallback Brief<br/>transport_error"]
-    J -->|Valid JSON| L["Check<br/>Constraints:<br/>Priority, Safety"]
-    L -->|Mismatch| M["Deterministic<br/>Fallback Brief<br/>validation_failed"]
-    L -->|Pass| N["Validated Nebius<br/>Model Brief"]
-    G --> O["Display Brief +<br/>Dossier Status<br/>Approval Pending"]
-    K --> O
-    M --> O
-    N --> O
-    O --> P["Human Review<br/>Required"]
+flowchart TD
+    A["Select Scenario"]
+    B["MRI Core + ChangeGuard"]
+    C["Structured Dossier"]
+    D["Display Dossier"]
+    E["Click: Generate Brief"]
+    F{.env<br/>Complete?}
+    G["Build Request:<br/>Evidence Only"]
+    H["POST to Nebius"]
+    I{Response<br/>Valid?}
+    J{Check<br/>Constraints}
+    K["Fallback Brief<br/>(any failure reason)"]
+    L["Validated Nebius<br/>Model Brief"]
+    M["Display Brief<br/>+ Dossier Status<br/>Approval Pending"]
+    N["Human Review<br/>Required"]
+
+    A --> B --> C --> D --> E --> F
+    F -->|No| K
+    F -->|Yes| G --> H --> I
+    I -->|No| K
+    I -->|Yes| J
+    J -->|Mismatch| K
+    J -->|Pass| L
+    K --> M
+    L --> M
+    M --> N
 ```
 
 ### Walkthrough
