@@ -111,6 +111,36 @@ python -m hackathon.nebius_nvidia.demo
 
 Outputs deterministic evidence dossiers and metrics for four synthetic scenarios.
 
+## Synthetic Scenarios
+
+The four scenarios are deterministic synthetic MRI workflow tests, not random data or clinical samples. Each scenario exercises a specific workflow path and validates evidence integrity.
+
+1. **Consistent Baseline + Current** (`consistent_baseline_current`)
+   - **Purpose**: Validate workflow for matching baseline and current evidence (no change detected)
+   - **Image**: Identical synthetic disc (radius 30) for both current and baseline
+   - **Expected Status**: CONSISTENT
+   - **Outcome**: No ChangeGuard findings; low review priority; deterministic fallback (if no brief requested) shows unchanged state
+
+2. **Large Change Review** (`large_change_review`)
+   - **Purpose**: Validate workflow for significant change detection requiring human review
+   - **Image**: Current disc (radius 50) vs. baseline (radius 15); substantial foreground and intensity shift
+   - **Expected Status**: REVIEW
+   - **Outcome**: ChangeGuard detects changes exceeding thresholds; medium review priority; requires human evaluation before approval
+
+3. **Low Information Uncertain** (`low_information_uncertain`)
+   - **Purpose**: Validate workflow for low-contrast, unclear evidence (no baseline for comparison)
+   - **Image**: Uniform low-contrast image (value 100), no baseline supplied
+   - **Expected Status**: UNCERTAIN
+   - **Outcome**: Quality flags triggered (low contrast, foreground nearly full); no ChangeGuard analysis; high review priority; human reviewer must assess sufficiency
+
+4. **Reviewer Approval Gate** (`reviewer_approval`)
+   - **Purpose**: Validate named-reviewer approval workflow and dossier immutability
+   - **Image**: Same as "Large Change Review" (current radius 50 vs. baseline radius 15)
+   - **Expected Status**: REVIEW (dossier status unchanged)
+   - **Outcome**: Demonstrates that a named reviewer can make an approval decision, the dossier retains its PENDING state and REVIEW status unchanged, and the approval requirement is enforced
+
+All scenarios produce deterministic dossiers with status, quality metrics, ChangeGuard findings (where applicable), and review notes. The optional Nebius brief overlays model-authored prose on this deterministic foundation; the brief is validated against the dossier facts and discarded (fallback) if it violates the grounding constraints.
+
 ### Streamlit UI (with optional Nebius integration)
 
 ```bash
@@ -215,3 +245,33 @@ Tests cover:
   - Safety statement is fixed project text, never substituted with model output
   - All validation failures safely trigger deterministic fallback
 - **Offline-safe**: Full functionality available without network or Nebius credentials; fallback works for any reason (not configured, network error, invalid response, validation failure)
+
+## Live Nebius Integration: Challenges and Lessons
+
+### Observed Issues
+
+During live testing with the NVIDIA Nemotron model via Nebius Token Factory, several validation failures were observed:
+
+1. **Insufficient Output Budget**: Early configuration used `max_tokens=160`, which was insufficient for generating complete, usable responses. Some model outputs were truncated (finish reason: `length`), yielding no usable content or null/empty message fields.
+
+2. **Priority Mismatch**: Some model responses chose a review priority that did not match the deterministic mapping from the dossier status (e.g., returned "HIGH" when the status mapping required "MEDIUM").
+
+3. **Safety Statement Validation**: Model responses included paraphrases or variations of the project-authored safety statement instead of copying the exact text, triggering fallback with reason `validation_failed: safety_statement must be exact`.
+
+### Implemented Solutions
+
+1. **Increased Output Limit**: Raised `max_tokens` from 160 to 1024 to provide sufficient budget for complete brief generation. This eliminated truncation and improved response usability.
+
+2. **Deterministic Priority Enforcement**: The system prompt now explicitly instructs the model to copy the required priority from the user message (`REQUIRED_REVIEW_PRIORITY`) using the fixed mapping (CONSISTENT→LOW, REVIEW→MEDIUM, UNCERTAIN→HIGH). Responses with mismatched priority still trigger fallback; validation is not relaxed.
+
+3. **Exact Safety Statement Matching**: The system prompt and user message now supply the exact project-authored safety statement (`REQUIRED_SAFETY_STATEMENT`). Validation rejects any variation (paraphrase, edit, clinical language), triggering labeled fallback (`validation_failed: safety_statement must be exact`).
+
+4. **Comprehensive Fallback**: All validation failures—transport errors, invalid JSON, schema violations, priority mismatch, safety statement mismatch—produce a labeled, deterministic fallback brief without modifying the dossier or approval state.
+
+### Limitations and Requirements
+
+- **Model-Authored Text Not Independently Fact-Verified**: The fields `evidence_summary`, `why_human_review_is_needed`, and `recommended_workflow_action` are model-written. They are checked for non-empty text, length, and diagnostic-wording safety, but **not** independently verified for factual accuracy, correct numbers, or status-keyword consistency. A qualified human reviewer must verify all model-authored text against source images before any clinical use.
+
+- **No Clinical Validation**: The system does not perform clinical validation of the model output. The live test on Scenario 4 was a single observation under specific configuration and does not constitute a reliability evaluation, accuracy assessment, or clinical validation. This is a non-diagnostic workflow support tool.
+
+- **Synthetic Workflow Testing Only**: All four scenarios use deterministic synthetic data and synthetic workflow validation metrics. Results establish that the system handles the expected workflow paths and enforces the grounding constraints; they do not validate the model's performance on real images or clinical data.
