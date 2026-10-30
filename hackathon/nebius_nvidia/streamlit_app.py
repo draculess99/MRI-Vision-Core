@@ -16,7 +16,7 @@ from hackathon.nebius_nvidia.evidence_dossier import (
     EvidenceDossier,
     build_dossier_from_images,
 )
-from hackathon.nebius_nvidia.local_env import get_nebius_config_from_env_file
+from hackathon.nebius_nvidia.local_env import get_nebius_config
 from hackathon.nebius_nvidia.nemotron_review import (
     NebiusConfig,
     ReviewerBrief,
@@ -123,14 +123,14 @@ def render_brief_section(brief: ReviewerBrief) -> None:
 
 
 def generate_brief_with_config(dossier: EvidenceDossier) -> Optional[ReviewerBrief]:
-    """Generate a reviewer brief using Nebius credentials from .env, else use fallback."""
-    api_key, base_url, model = get_nebius_config_from_env_file()
+    """Generate a reviewer brief using Nebius credentials from environment or .env, else use fallback."""
+    api_key, base_url, model = get_nebius_config()
 
     if not (api_key and base_url and model):
         st.info(
-            "Nebius configuration not set in .env. Using deterministic fallback brief. "
+            "Nebius configuration not set. Using deterministic fallback brief. "
             "To use the Nebius model, set NEBIUS_API_KEY, NEBIUS_BASE_URL, "
-            "and NEBIUS_MODEL in the repository-root .env file."
+            "and NEBIUS_MODEL via environment variables or in the repository-root .env file."
         )
         return fallback_brief(dossier, "not_configured")
 
