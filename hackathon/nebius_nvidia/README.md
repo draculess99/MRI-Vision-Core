@@ -119,7 +119,7 @@ The four scenarios are deterministic synthetic MRI workflow tests, not random da
    - **Purpose**: Validate workflow for matching baseline and current evidence (no change detected)
    - **Image**: Identical synthetic disc (radius 30) for both current and baseline
    - **Expected Status**: CONSISTENT
-   - **Outcome**: No ChangeGuard findings; low review priority; deterministic fallback (if no brief requested) shows unchanged state
+   - **Outcome**: No ChangeGuard findings; low review priority. The dossier is displayed. If no brief is requested (button not clicked), the workflow stops here. If a brief is requested and succeeds, it will have priority LOW; if it fails (config/transport/validation), a deterministic fallback shows unchanged state
 
 2. **Large Change Review** (`large_change_review`)
    - **Purpose**: Validate workflow for significant change detection requiring human review
@@ -178,7 +178,7 @@ NEBIUS_MODEL=<exact model ID from your Nebius dashboard>
 
 When the "Generate Reviewer Brief" button is clicked:
 
-1. Structured synthetic dossier evidence (status, quality metrics, ChangeGuard status/deltas, review notes) is sent to Nebius, with `max_tokens=1024`
+1. Structured synthetic dossier evidence (status, quality metrics, ChangeGuard status/deltas, review notes) is sent to Nebius, with `max_tokens=4096`
 2. A JSON brief is returned and checked (see below)
 3. The brief source is marked as either "Validated Nebius Model" or "Deterministic Fallback"
 4. The brief is displayed with a fixed, project-authored safety statement
@@ -260,13 +260,28 @@ During live testing with the NVIDIA Nemotron model via Nebius Token Factory, sev
 
 ### Implemented Solutions
 
-1. **Increased Output Limit**: Raised `max_tokens` from 160 to 1024 to provide sufficient budget for complete brief generation. This eliminated truncation and improved response usability.
+1. **Increased Output Limit**: Raised `max_tokens` from 160 to 4096. With 160 tokens, live testing observed truncated responses with finish reason `length`. This change provides substantially more budget for brief generation.
 
-2. **Deterministic Priority Enforcement**: The system prompt now explicitly instructs the model to copy the required priority from the user message (`REQUIRED_REVIEW_PRIORITY`) using the fixed mapping (CONSISTENT→LOW, REVIEW→MEDIUM, UNCERTAIN→HIGH). Responses with mismatched priority still trigger fallback; validation is not relaxed.
+2. **Request Timeout**: Set reviewer-brief HTTP timeout to 90 seconds to accommodate network latency and model processing time. Timeout errors trigger deterministic fallback without modifying the dossier.
 
-3. **Exact Safety Statement Matching**: The system prompt and user message now supply the exact project-authored safety statement (`REQUIRED_SAFETY_STATEMENT`). Validation rejects any variation (paraphrase, edit, clinical language), triggering labeled fallback (`validation_failed: safety_statement must be exact`).
+3. **Deterministic Priority Enforcement**: The system prompt now explicitly instructs the model to copy the required priority from the user message (`REQUIRED_REVIEW_PRIORITY`) using the fixed mapping (CONSISTENT→LOW, REVIEW→MEDIUM, UNCERTAIN→HIGH). Responses with mismatched priority still trigger fallback; validation is not relaxed.
 
-4. **Comprehensive Fallback**: All validation failures—transport errors, invalid JSON, schema violations, priority mismatch, safety statement mismatch—produce a labeled, deterministic fallback brief without modifying the dossier or approval state.
+4. **Exact Safety Statement Matching**: The system prompt and user message now supply the exact project-authored safety statement (`REQUIRED_SAFETY_STATEMENT`). Validation rejects any variation (paraphrase, edit, clinical language), triggering labeled fallback (`validation_failed: safety_statement must be exact`).
+
+5. **Comprehensive Fallback**: All validation failures—transport errors, invalid JSON, schema violations, priority mismatch, safety statement mismatch, timeout—produce a labeled, deterministic fallback brief without modifying the dossier or approval state.
+
+### Model Migration and Reliability
+
+**Current Model:** The reviewer brief uses `nvidia/Nemotron-3_5-Lightning` via Nebius Token Factory.
+
+**Prior Model:** The previous model `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` was scheduled for retirement and has been migrated to maintain service continuity.
+
+**Configuration and Limits:**
+- Completion token limit: 4,096 tokens per request
+- HTTP request timeout: 90 seconds
+- Response is mandatory JSON object with fixed schema; invalid/empty responses trigger fallback
+
+**Reliability:** The reviewer brief is accepted only after structured-output validation. If the configured model is unavailable, times out, returns invalid or empty content, or fails schema validation, the app uses the deterministic fallback brief. The dossier status and human-approval requirement (`PENDING_HUMAN_APPROVAL`) are never changed by the model response.
 
 ### Limitations and Requirements
 

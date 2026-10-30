@@ -136,7 +136,7 @@ def generate_brief_with_config(dossier: EvidenceDossier) -> Optional[ReviewerBri
 
     try:
         config = NebiusConfig(api_key=api_key, base_url=base_url, model=model)
-        transport = UrllibTransport(config, timeout=30.0)
+        transport = UrllibTransport(config, timeout=90.0)
         return generate_reviewer_brief(dossier=dossier, transport=transport, config=config)
     except Exception as e:
         st.error(f"Failed to generate brief: {type(e).__name__}")

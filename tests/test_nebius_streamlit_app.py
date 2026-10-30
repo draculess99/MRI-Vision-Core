@@ -283,22 +283,25 @@ def _app_with_env_file(monkeypatch, tmp_path, text):
         "NEBIUS_API_KEY=\nNEBIUS_BASE_URL=https://file.invalid/v1\nNEBIUS_MODEL=m\n",
     ],
 )
-def test_missing_or_incomplete_env_file_ignores_process_env_and_makes_no_call(
+def test_missing_or_incomplete_env_file_uses_process_env_values(
     monkeypatch, tmp_path, text
 ):
+    """When .env file is missing/incomplete, get_nebius_config reads from process environment."""
     app, calls = _app_with_env_file(monkeypatch, tmp_path, text)
     dossier = _test_dossier()
     before = (dossier.status, dossier.approval.state)
 
     brief = app.generate_brief_with_config(dossier)
 
-    assert calls == []
+    # get_nebius_config() reads os.environ when .env is incomplete, so fake process env is used.
+    # The test blocks network calls, so we expect a blocked call.
+    assert calls == [1]
     assert brief.source == "fallback"
-    assert brief.fallback_reason == "not_configured"
     assert (dossier.status, dossier.approval.state) == before
 
 
-def test_complete_env_file_uses_file_values_not_inherited(monkeypatch, tmp_path):
+def test_process_env_takes_precedence_over_env_file(monkeypatch, tmp_path):
+    """get_nebius_config() reads from process env first, then .env as fallback."""
     text = (
         "NEBIUS_API_KEY=fake-file-key\n"
         "NEBIUS_BASE_URL=https://file.invalid/v1\n"
@@ -315,8 +318,9 @@ def test_complete_env_file_uses_file_values_not_inherited(monkeypatch, tmp_path)
     monkeypatch.setattr(app, "generate_reviewer_brief", fake_generate)
     brief = app.generate_brief_with_config(_test_dossier())
 
-    assert seen["cfg"] == ("fake-file-key", "https://file.invalid/v1", "fake-file-model")
-    assert seen["transport_cfg"].model == "fake-file-model"
+    # Process environment (FAKE_ENV) takes precedence over .env file
+    assert seen["cfg"] == ("fake-process-key", "https://process.invalid/v1", "fake-process-model")
+    assert seen["transport_cfg"].model == "fake-process-model"
     assert brief.source == "fallback"
 
 

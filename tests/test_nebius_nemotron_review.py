@@ -13,6 +13,7 @@ from hackathon.nebius_nvidia.evidence_dossier import (
 )
 from hackathon.nebius_nvidia.nemotron_review import (
     BRIEF_KEYS,
+    REVIEWER_BRIEF_MAX_TOKENS,
     SAFETY_STATEMENT,
     SYSTEM_PROMPT,
     NebiusConfig,
@@ -146,6 +147,10 @@ def test_transport_failure_uses_fallback():
 def test_no_config_no_transport_falls_back_without_network(monkeypatch):
     for name in ("NEBIUS_API_KEY", "NEBIUS_BASE_URL", "NEBIUS_MODEL"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        "hackathon.nebius_nvidia.local_env.load_env_file",
+        lambda env_path=None: {}
+    )
     brief = generate_reviewer_brief(_dossier())
     assert brief.source == "fallback"
     assert brief.fallback_reason == "not_configured"
@@ -181,7 +186,8 @@ def test_urllib_transport_request_includes_required_fields():
     assert len(request_bodies) == 1
     body = request_bodies[0]
     assert body["temperature"] == 0
-    assert body["max_tokens"] == 1024
+    assert body["max_tokens"] == REVIEWER_BRIEF_MAX_TOKENS
+    assert body["max_tokens"] == 4096
     assert body["store"] is False
     assert body["response_format"] == {"type": "json_object"}
     assert body["model"] == "test-model"
@@ -277,6 +283,37 @@ def test_null_content_in_response_uses_fallback():
         "transport_stage: response_null_content "
         "(finish=absent; content=null; reasoning=no; output_tokens=absent)"
     )
+    assert _snapshot(d) == before
+    assert d.approval.state is ApprovalState.PENDING
+
+
+def test_length_limited_response_with_reasoning_uses_fallback():
+    """Verify response hitting max_tokens limit with reasoning falls back safely."""
+    from unittest.mock import MagicMock
+
+    cfg = NebiusConfig(api_key="test-key", base_url="https://api.test", model="test-model")
+    transport = UrllibTransport(cfg)
+    d = _dossier()
+
+    # Mock response where model hit the completion token limit with reasoning
+    length_limited_response = json.dumps({
+        "choices": [{"message": {"content": None, "reasoning_content": "...brief reasoning..."}, "finish_reason": "length"}],
+        "usage": {"completion_tokens": REVIEWER_BRIEF_MAX_TOKENS}
+    })
+    mock_response = MagicMock()
+    mock_response.read.return_value = length_limited_response.encode("utf-8")
+    mock_response.__enter__ = lambda self: self
+    mock_response.__exit__ = lambda self, *args: None
+
+    before = _snapshot(d)
+    with patch("urllib.request.urlopen", return_value=mock_response):
+        brief = generate_reviewer_brief(d, config=cfg)
+
+    assert brief.source == "fallback"
+    assert "response_null_content" in brief.fallback_reason
+    assert f"finish=length" in brief.fallback_reason
+    assert f"output_tokens={REVIEWER_BRIEF_MAX_TOKENS}" in brief.fallback_reason
+    assert "reasoning=yes" in brief.fallback_reason
     assert _snapshot(d) == before
     assert d.approval.state is ApprovalState.PENDING
 
@@ -680,3 +717,24 @@ def test_dossier_unchanged_on_safety_statement_mismatch():
     assert brief.safety_statement == SAFETY_STATEMENT
     assert _snapshot(d) == before
     assert d.approval.state is ApprovalState.PENDING
+
+
+def test_nebius_config_from_env_loads_from_env_dict():
+    """NebiusConfig.from_env() must load from provided environ dict (e.g., from .env file)."""
+    environ = {
+        "NEBIUS_API_KEY": "test-api-key",
+        "NEBIUS_BASE_URL": "https://test.example.com/v1/",
+        "NEBIUS_MODEL": "test-model-id",
+    }
+    config = NebiusConfig.from_env(environ)
+    assert config is not None
+    assert config.api_key == "test-api-key"
+    assert config.base_url == "https://test.example.com/v1/"
+    assert config.model == "test-model-id"
+
+
+def test_nebius_config_from_env_returns_none_if_incomplete():
+    """NebiusConfig.from_env() must return None if any required value is missing."""
+    environ_incomplete = {"NEBIUS_API_KEY": "key-only"}
+    config = NebiusConfig.from_env(environ_incomplete)
+    assert config is None

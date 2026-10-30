@@ -25,6 +25,8 @@ ENV_API_KEY = "NEBIUS_API_KEY"
 ENV_BASE_URL = "NEBIUS_BASE_URL"
 ENV_MODEL = "NEBIUS_MODEL"
 
+REVIEWER_BRIEF_MAX_TOKENS = 4096
+
 BRIEF_KEYS = (
     "review_priority",
     "evidence_summary",
@@ -191,8 +193,8 @@ class NebiusConfig:
 
     @classmethod
     def from_env(cls, environ: Optional[Mapping[str, str]] = None) -> Optional["NebiusConfig"]:
-        env = os.environ if environ is None else environ
-        key, url, model = (env.get(n, "").strip() for n in (ENV_API_KEY, ENV_BASE_URL, ENV_MODEL))
+        from hackathon.nebius_nvidia.local_env import get_nebius_config
+        key, url, model = get_nebius_config(environ)
         return cls(key, url, model) if key and url and model else None
 
 
@@ -203,7 +205,7 @@ Transport = Callable[[Messages, Optional[NebiusConfig]], str]
 class UrllibTransport:
     """Chat-completions style POST via stdlib urllib (OpenAI-compatible request shape)."""
 
-    def __init__(self, config: NebiusConfig, timeout: float = 30.0) -> None:
+    def __init__(self, config: NebiusConfig, timeout: float = 90.0) -> None:
         self.config = config
         self.timeout = timeout
 
@@ -214,7 +216,7 @@ class UrllibTransport:
                 "model": cfg.model,
                 "messages": messages,
                 "temperature": 0,
-                "max_tokens": 1024,
+                "max_tokens": REVIEWER_BRIEF_MAX_TOKENS,
                 "store": False,
                 "response_format": {"type": "json_object"},
             }
